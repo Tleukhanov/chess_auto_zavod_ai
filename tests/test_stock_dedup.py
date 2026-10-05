@@ -215,8 +215,9 @@ class RunStockShortDedupTests(unittest.TestCase):
             bgm_mode="off",
             music_dir=str(tmp),
             bgm_volume=0.2,
-            vo_rate="+0%",
-            vo_pitch="+3Hz",
+                vo_rate="+0%",
+                vo_pitch="+3Hz",
+                vo_enabled=True,
             output_dir=tmp / "outputs",
             publish_platforms=[],
         )

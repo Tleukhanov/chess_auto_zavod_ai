@@ -41,6 +41,11 @@ from shorts_clipper.pipeline.stock_dedup import (
 from shorts_clipper.visual import stock as stock_visual
 from shorts_clipper.visual import stock_tags
 
+# Russian narration runs ~2.6 words/second. Used only to derive a clip runtime
+# when no voiceover is produced, so a text-only channel still gets a sensible
+# duration instead of a fixed guess.
+_SILENT_SPEECH_WORDS_PER_SECOND = 2.6
+
 log = logging.getLogger(__name__)
 
 
@@ -267,37 +272,60 @@ def run_stock_short(
             from shorts_clipper.captions.music import track_duration
 
             vo_path = clip_work_dir / "vo.wav"
+            word_bounds: list = []
+            has_vo = False
             # For motivational stock shorts a natural pacing reads far better
             # than the global fast default; explicit SHORTS_VO_RATE still wins.
             stock_rate = "+0%"
             if settings.vo_rate not in ("", "+8%"):
                 stock_rate = settings.vo_rate
 
-            vo_path, word_bounds = synthesize_voiceover_boundaries(
-                script,
-                vo_path,
-                voice=None,
-                rate=stock_rate,
-                pitch=settings.vo_pitch or "+3Hz",
-            )
-            if vo_path is None:
-                log.error("Stock short needs an AI voiceover (SHORTS_VO_ENABLED). Skipping.")
-                continue
-            speak_duration = track_duration(vo_path) or 8.0
+            if getattr(settings, "vo_enabled", False):
+                vo_path, word_bounds = synthesize_voiceover_boundaries(
+                    script,
+                    vo_path,
+                    voice=None,
+                    rate=stock_rate,
+                    pitch=settings.vo_pitch or "+3Hz",
+                )
+                has_vo = vo_path is not None
+                if not has_vo:
+                    # Not fatal. Some channels carry their message entirely in
+                    # on-screen text over a bed (e.g. chess annotations), and a
+                    # missing narration should not silently drop the short.
+                    log.warning(
+                        "Stock short voiceover unavailable; rendering without narration."
+                    )
+
+            if has_vo:
+                speak_duration = track_duration(vo_path) or 8.0
+            else:
+                # No narration to pace against, so derive the runtime from the
+                # script length instead. Russian speech is ~2.6 words/second.
+                speak_duration = max(
+                    3.0,
+                    len(script.split()) / _SILENT_SPEECH_WORDS_PER_SECOND,
+                )
             render_duration = speak_duration + 1.2  # tail room
 
             # 3. Build subtitle segments from real spoken word boundaries when
             #    available; otherwise fall back to the uniform grid.
             seg_shift = 0.0
-            from shorts_clipper.audio.tts import speech_window as tts_speech_window
+            if has_vo:
+                from shorts_clipper.audio.tts import speech_window as tts_speech_window
 
-            speech = tts_speech_window(vo_path)
-            if speech is None:
-                speech = stock_visual.speech_window(vo_path)
-            if speech is not None:
-                seg_shift, speech_end = speech
-                effective_dur = max(0.5, speech_end - seg_shift)
+                speech = tts_speech_window(vo_path)
+                if speech is None:
+                    speech = stock_visual.speech_window(vo_path)
+                if speech is not None:
+                    seg_shift, speech_end = speech
+                    effective_dur = max(0.5, speech_end - seg_shift)
+                else:
+                    effective_dur = speak_duration
             else:
+                # No narration to align to, so spread the words over the whole
+                # runtime and let the caption pacing carry the reading time.
+                seg_shift = 0.0
                 effective_dur = speak_duration
 
             if word_bounds and len(word_bounds) >= 2:
@@ -460,7 +488,7 @@ def run_stock_short(
                 video_codec=settings.video_codec,
                 preset=settings.video_preset,
                 style_name=settings.subtitle_style,
-                vo_output_path=vo_path,
+                vo_output_path=vo_path if has_vo else None,
                 flash_events=edit_flash,
                 caption_pop=getattr(settings, "caption_scale_pop", False),
                 **banner_kwargs,

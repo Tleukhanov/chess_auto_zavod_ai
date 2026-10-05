@@ -34,6 +34,15 @@ dev = [
   "pytest>=8.0",
   "ruff>=0.4",
 ]
+# Chess analysis (shorts_clipper.chess). Kept optional so the base clip pipeline
+# does not pull them in: python-chess does the PGN/board work and Pillow draws
+# the board, which is all the chess formats need. A Stockfish binary is optional
+# at runtime too -- without it the module falls back to a material estimate and
+# flags every result as such.
+chess = [
+  "python-chess>=1.11",
+  "Pillow>=10.0",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

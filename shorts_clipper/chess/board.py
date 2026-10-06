@@ -114,6 +114,9 @@ class FrameSpec:
     accent: str = "neutral"  # "bad" | "good" | "neutral"
     highlight_squares: tuple[str, ...] = ()
     arrow: tuple[str, str] | None = None
+    # Engine evaluation, shown so the claim on screen is checkable rather than
+    # asserted. A chess audience verifies, and a number is what they can check.
+    eval_text: str | None = None
 
 
 def _accent_color(accent: str):
@@ -155,6 +158,16 @@ def render_frame(spec: FrameSpec, out_path: str | Path) -> Path:
             spec.bottom_text,
             fill=TEXT_DIM,
             font=_first_font(_TEXT_FONTS, 44, "Х"),
+            anchor="mm",
+        )
+    if spec.eval_text:
+        # Sits under the hook, above the board: present but never competing with
+        # the question.
+        draw.text(
+            (FRAME_W // 2, 232),
+            spec.eval_text,
+            fill=TEXT_DIM,
+            font=_first_font(_TEXT_FONTS, 40, "Х"),
             anchor="mm",
         )
 

@@ -93,6 +93,68 @@ def plan_for_decision(decision, captions: str | None = None) -> ChessClipPlan:
     )
 
 
+def plan_for_challenge(challenge, hold_question: float = 4.2, hold_answer: float = 3.0):
+    """Two beats for a challenge: the question, held, then the answer.
+
+    The question holds far longer than any other beat in this module. That is the
+    point of the format -- the viewer needs time to actually find the move, and a
+    two-second window would just be a reveal again.
+    """
+    try:
+        import chess
+    except ImportError:
+        return ChessClipPlan(frames=[])
+
+    try:
+        chess.Board(challenge.fen)  # validates the FEN before we trust it
+        move = chess.Move.from_uci(challenge.best_uci)
+        src = chess.square_name(move.from_square)
+        dst = chess.square_name(move.to_square)
+    except Exception:
+        log.debug("challenge plan could not parse its position", exc_info=True)
+        return ChessClipPlan(frames=[])
+
+    eval_line = _eval_caption(challenge)
+
+    return ChessClipPlan(
+        frames=[
+            # The question frame must show the position untouched. Highlighting the
+            # origin and destination -- or even the evaluation -- gives the answer
+            # away, which turns the puzzle back into the reveal format. Verified by
+            # looking at the rendered frame, not by reading this code.
+            FrameSpec(
+                fen=challenge.fen,
+                top_text=challenge.question(),
+                bottom_text="",
+                accent="neutral",
+            ),
+            FrameSpec(
+                fen=challenge.fen,
+                top_text=challenge.question(),
+                bottom_text=challenge.answer(),
+                accent="good",
+                highlight_squares=(src, dst),
+                arrow=(src, dst),
+                eval_text=eval_line,
+            ),
+        ],
+        before_seconds=hold_question,
+        move_seconds=hold_answer,
+        after_seconds=0.0,
+    )
+
+
+def _eval_caption(challenge) -> str | None:
+    """`оценка +0.6` from the mover's side, in Russian."""
+    try:
+        value = challenge.mover_cp / 100.0
+    except Exception:
+        return None
+    if challenge.mate_in:
+        return f"оценка: мат в {challenge.mate_in}"
+    return f"оценка: {value:+.1f}"
+
+
 def render_clip(
     plan: ChessClipPlan,
     out_path: str | Path,

@@ -452,6 +452,61 @@ def analyse(
     return out
 
 
+def top_moves(
+    fen: str,
+    count: int = 2,
+    depth_override: int | None = None,
+    movetime_override: int | None = None,
+    path: Path | None = None,
+) -> list[tuple[str, Eval]] | None:
+    """The *count* best moves with their scores, best first, or ``None``.
+
+    A challenge position is only worth publishing when the best move is
+    *discoverable but not obvious*: that means the second-best line has to be
+    measurably worse. One eval per position cannot express that, so this returns
+    several lines from a single MultiPV search.
+
+    Each entry is ``(uci, Eval)`` with ``Eval.cp`` in white's point of view, as
+    everywhere else in this module. Never returns a partial list.
+    """
+    chess = _chess_module()
+    if chess is None:
+        return None
+    try:
+        board = chess.Board(fen)
+    except Exception:
+        log.debug("top_moves: bad fen", exc_info=True)
+        return None
+    try:
+        count = max(1, min(int(count), 5))
+    except (TypeError, ValueError):
+        count = 2
+    if board.legal_moves.count() < count:
+        count = max(1, board.legal_moves.count())
+
+    with session(path=path) as proc:
+        if proc is None:
+            return None
+        limit = limits(depth_override, movetime_override)
+        try:
+            infos = proc.analyse(board, limit, multipv=count)
+        except Exception:
+            log.debug("top_moves: MultiPV search failed", exc_info=True)
+            return None
+    out: list[tuple[str, Eval]] = []
+    for info in infos:
+        if info.get("pv") is None:
+            continue
+        pv = info["pv"]
+        if not pv:
+            continue
+        out.append((pv[0].uci(), _eval_from_info(info, chess)))
+    if not out:
+        return None
+    out.sort(key=lambda item: item[1].cp, reverse=True)
+    return out
+
+
 def mover_loss_cp(before: Eval, after: Eval, white_to_move: bool) -> int:
     """Centipawns the mover gave up by playing the move; positive means a mistake.
 

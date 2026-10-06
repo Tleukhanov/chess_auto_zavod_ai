@@ -5,6 +5,7 @@ Usage:
     python -m shorts_clipper autopilot [options]
     python -m shorts_clipper scout
     python -m shorts_clipper inspect <file.mp4>
+    python -m shorts_clipper chess <game.pgn | dir-of-pgns> [options]
 
 Examples:
     python -m shorts_clipper clip https://youtu.be/xyz --output ./clips/
@@ -13,6 +14,8 @@ Examples:
     python -m shorts_clipper clip --source URL1 URL2 --continue-on-error
     python -m shorts_clipper autopilot --batch-file sources.txt
     python -m shorts_clipper inspect outputs/stock_short_1.mp4
+    python -m shorts_clipper chess data/pgns --count 3
+    python -m shorts_clipper chess game.pgn --no-music
 """
 
 from __future__ import annotations
@@ -251,6 +254,99 @@ def _cmd_cleanup(args: argparse.Namespace, settings: Settings) -> int:  # noqa: 
     return 0
 
 
+def _cmd_chess(args: argparse.Namespace, settings: Settings) -> int:
+    from shorts_clipper.chess import batch
+
+    if getattr(args, "clear_used", False):
+        history = Path(args.used_path) if args.used_path else batch.used_path(settings)
+        dropped = batch.clear_used(history)
+        print(f"🧹 Cleared {dropped} chess moment(s) from {history}")
+        if not getattr(args, "path", None):
+            return 0
+
+    paths = [str(p) for p in (getattr(args, "path", None) or [])]
+    if not paths:
+        print(
+            "❌ No PGN given: pass a file or a directory "
+            "(e.g. shorts-clipper chess data/pgns --count 2)",
+            file=sys.stderr,
+        )
+        return 2
+
+    from shorts_clipper.chess import analysis
+
+    if not analysis.available():
+        print(
+            "❌ python-chess is not installed. Install the extra: pip install -e \".[chess]\"",
+            file=sys.stderr,
+        )
+        return 2
+
+    count = getattr(args, "count", 1)
+    continue_on_error = getattr(args, "continue_on_error", False)
+    music = getattr(args, "music", None)
+    no_music = getattr(args, "no_music", False)
+    if no_music:
+        music = None
+
+    if not no_music:
+        bed = (
+            Path(music)
+            if music
+            else Path(settings.music_dir) / batch.DEFAULT_CHESS_MUSIC
+        )
+        if not bed.is_file():
+            print(f"⚠️  No music bed at {bed} — rendering silent.", file=sys.stderr)
+
+    print(f"♟️  CHESS BATCH START: {len(paths)} path(s), --count {count} "
+          f"(fail-fast={not continue_on_error})")
+    try:
+        result = batch.run_batch(
+            paths,
+            settings=settings,
+            count=count,
+            critical_cp=getattr(args, "critical_cp", None),
+            min_ply=getattr(args, "min_ply", None),
+            output_dir=getattr(args, "output", None),
+            music=music,
+            no_music=no_music,
+            seed=getattr(args, "seed", batch.DEFAULT_SEED),
+            continue_on_error=continue_on_error,
+            used_file=getattr(args, "used_path", None),
+        )
+    except batch.ChessBatchError as exc:
+        print(f"❌ CHESS BATCH ABORTED — {exc}")
+        return 1
+
+    for r in result.results:
+        if r.ok:
+            detail = f"{len(r.clips)} clip(s)"
+            if r.skipped_used:
+                detail += f", {r.skipped_used} already cut"
+            if r.games_in_file > 1:
+                detail += f" (file holds {r.games_in_file} games, used the first)"
+            print(f"✅ [{r.index}/{result.total}] {r.source} — {detail}")
+        else:
+            print(f"❌ [{r.index}/{result.total}] {r.source} FAILED: {r.error}")
+
+    if not result.clips:
+        print(
+            "❌ No clip produced: no game yielded a moment above the threshold"
+            + (f" ({result.skipped_duplicate} already cut — try --clear-used)"
+               if result.skipped_duplicate else ""),
+            file=sys.stderr,
+        )
+
+    if result.ok and result.clips:
+        print("\n🔥 CHESS BATCH SUCCESS — " + ", ".join(str(p) for p in result.clips))
+        return 0
+    if result.ok and not result.clips:
+        print("\n❌ CHESS BATCH FAILED — nothing was clipped.")
+        return 1
+    print(f"\n❌ CHESS BATCH FAILED — {result.failed}/{result.total} source(s) failed.")
+    return 1
+
+
 def _cmd_doctor(args: argparse.Namespace, settings: Settings) -> int:  # noqa: ARG001
     from shorts_clipper.cli.doctor import run_doctor
 
@@ -461,6 +557,76 @@ def build_parser() -> argparse.ArgumentParser:
              "(default: outputs/retention_report.json).",
     )
 
+    # ── chess ─────────────────────────────────────────────────────────────────
+    chess_p = sub.add_parser(
+        "chess",
+        help="Cut chess shorts from a PGN, a directory of PGNs, or both.",
+    )
+    chess_p.add_argument(
+        "path",
+        nargs="*",
+        metavar="PATH",
+        help="PGN file and/or directory of .pgn files. With no path, "
+             "--clear-used just resets the dedup history.",
+    )
+    chess_p.add_argument(
+        "-o",
+        "--output",
+        metavar="DIR",
+        default=None,
+        help="Output directory (default: outputs/chess)",
+    )
+    chess_p.add_argument(
+        "-c",
+        "--count",
+        type=int,
+        default=1,
+        help="Moments to cut across the whole run, best N first (default: 1)",
+    )
+    chess_p.add_argument(
+        "--critical-cp",
+        type=int,
+        default=None,
+        help="Minimum evaluation loss in centipawns for a move to count "
+             "(default: 200)",
+    )
+    chess_p.add_argument(
+        "--min-ply",
+        type=int,
+        default=None,
+        help="Ignore the first N plies so 'critical move' is not move 4 (default: 10)",
+    )
+    chess_p.add_argument(
+        "--music",
+        metavar="FILE",
+        default=None,
+        help="Music bed; defaults to dark_industrial_loop.wav under SHORTS_MUSIC_DIR",
+    )
+    chess_p.add_argument("--no-music", action="store_true", help="Render without a bed")
+    chess_p.add_argument(
+        "--seed",
+        type=int,
+        default=7,
+        help="Seed for the bed offset (default: 7)",
+    )
+    chess_p.add_argument(
+        "--used-path",
+        metavar="FILE",
+        default=None,
+        help="Dedup history file (default: data/chess_used.json)",
+    )
+    chess_p.add_argument(
+        "--clear-used",
+        action="store_true",
+        help="Forget every moment cut so far, so this run may re-cut them",
+    )
+    chess_p.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        help="Batch: keep going after a failed PGN instead of failing fast "
+             "(the overall run still exits non-zero).",
+    )
+
     # ── revenue-report ───────────────────────────────────────────────────────────
     revenue_p = sub.add_parser(
         "revenue-report",
@@ -509,6 +675,7 @@ def main(argv: list[str] | None = None) -> int:
         "doctor": _cmd_doctor,
         "retention-report": _cmd_retention_report,
         "revenue-report": _cmd_revenue_report,
+        "chess": _cmd_chess,
     }
     return dispatch[args.command](args, settings)
 

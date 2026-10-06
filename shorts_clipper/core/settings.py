@@ -165,6 +165,10 @@ class Settings:
     stock_edit_flash_bars: int = 2  # bars between edit-mode text flashes (1 = every bar)
     caption_scale_pop: bool = False  # per-caption scale punch-in (off keeps text calm)
     stock_affiliate_cards_enabled: bool = False
+    chess_critical_cp: int = 200
+    chess_min_ply: int = 10
+    chess_out_dir: Path = Path("outputs/chess")
+    chess_used_path: Path = Path("data/chess_used.json")
 
     @property
     def channel_token_dir(self) -> Path:
@@ -498,6 +502,21 @@ class Settings:
         except ValueError:
             clip_min_separation = 15.0
 
+        try:
+            chess_critical_cp = int(
+                _env("SHORTS_CHESS_CRITICAL_CP", file_values, "200") or "200"
+            )
+        except ValueError:
+            chess_critical_cp = 200
+        if chess_critical_cp < 0:
+            chess_critical_cp = 200
+        try:
+            chess_min_ply = int(_env("SHORTS_CHESS_MIN_PLY", file_values, "10") or "10")
+        except ValueError:
+            chess_min_ply = 10
+        if chess_min_ply < 0:
+            chess_min_ply = 10
+
         if proxy:
             os.environ["SHORTS_PROXY"] = proxy
 
@@ -693,4 +712,13 @@ class Settings:
             stock_edit_flash_bars=stock_edit_flash_bars,
             caption_scale_pop=caption_scale_pop,
             stock_affiliate_cards_enabled=stock_affiliate_cards_enabled,
+            chess_critical_cp=chess_critical_cp,
+            chess_min_ply=chess_min_ply,
+            chess_out_dir=Path(
+                _env("SHORTS_CHESS_OUT_DIR", file_values, "outputs/chess") or "outputs/chess"
+            ),
+            chess_used_path=Path(
+                _env("SHORTS_CHESS_USED_PATH", file_values, "data/chess_used.json")
+                or "data/chess_used.json"
+            ),
         )

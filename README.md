@@ -428,6 +428,39 @@ A: The pipeline uses the free tier of Gemini 1.5 Flash (via Google AI Studio) fo
 **Q: Why doesn't the YouTube uploader resume uploads?**
 A: The current `google-api-python-client` integration resets the upload cursor on timeout. A true chunked resume implementation is planned for a future release.
 
+## Chess formats (`shorts_clipper/chess/`)
+
+Game-analysis shorts need neither a voiceover nor anybody else's footage: the
+board is the visual. The pipeline is
+
+```
+PGN → find the deciding move → draw the position → cut with a music bed
+```
+
+and it is licence-free and deterministic.
+
+```bash
+pip install -e ".[chess]"      # python-chess + Pillow
+python scripts/make_chess_clip.py data/pgns/game.pgn --out outputs/
+```
+
+A clip is three beats — the position before the move, the move with its arrow,
+then the position after — because without the before-state a viewer only sees
+that something happened, not that it was wrong.
+
+Evaluation degrades honestly. If a Stockfish binary is found (`SHORTS_CHESS_ENGINE`
+or on `PATH`) it does the scoring; otherwise a material + piece-square estimate
+runs and every result is flagged `Decision.material = True`, so captions can say
+"material" rather than passing it off as analysis. That fallback also folds in
+whatever the opponent can simply take, because a blunder is usually a *quiet*
+move that leaves a piece attacked — a plain before/after comparison sees no
+change at all and finds nothing. Mating attacks and winning sacrifices are never
+flagged as mistakes.
+
+Frames are drawn with PIL rather than SVG, since nothing in the dependency set
+can rasterise SVG. Text and piece glyphs resolve to separate fonts: no single
+Windows font carries both Cyrillic and the chess block.
+
 ## Attribution
 
 This repository is a **fork / continuation** of the open-source project
@@ -437,10 +470,22 @@ its base code was imported as the very first commit in this repo
 publisher, scout autopilot, retention and affiliate-income features. We do
 **not** claim authorship of the upstream base.
 
-- Project: `https://github.com/Tleukhanov/llm_integration_zavod`
+This repository is further derived from
+[`Tleukhanov/llm_integration_zavod`](https://github.com/Tleukhanov/llm_integration_zavod)
+— the same upstream base plus its publisher/scout/retention work — after which
+the motivational-short content was split off and this repository was pointed at
+chess. That project remains the origin of everything outside `shorts_clipper/`.
+
+- Project: `https://github.com/Tleukhanov/chess_auto_zavod_ai`
+- Derived from: `https://github.com/Tleukhanov/llm_integration_zavod`
 - Upstream: `https://github.com/random-or/shorts-clipper`
 - License: MIT (full text in [`LICENSE`](LICENSE))
 - Upstream copyright: © 2026 Shorts Clipper contributors (retained in [`LICENSE`](LICENSE))
+
+Because the MIT license requires the notice and the license text to travel with
+every copy, both `LICENSE` and this section must stay in place. Everything
+outside `shorts_clipper/chess/` is inherited from the projects above; the chess
+modules (`shorts_clipper/chess/`) are new work added in this repository.
 
 The pipeline *builds on* well-known open-source components, which carry their
 own licenses and are **not** relicensed here:

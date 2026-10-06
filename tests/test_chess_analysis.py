@@ -90,7 +90,12 @@ class ChessAnalysisTests(unittest.TestCase):
     def test_blunder_is_detected_and_measured(self):
         game, worst = _build_blunder_game()
         self.assertIsNotNone(game, "no >=300cp blunder found in the random walk")
-        decisions = analysis.find_decisions(game, limit=1, min_ply=0)
+        # use_engine=False pins the material path: the expected numbers here are
+        # built from material_eval, and the assertion below is about the engine-free
+        # estimate. The engine path has its own tests in test_chess_engine.py, and
+        # this test must not start passing or failing depending on whether somebody
+        # happens to have a Stockfish binary installed.
+        decisions = analysis.find_decisions(game, limit=1, min_ply=0, use_engine=False)
         self.assertEqual(len(decisions), 1)
         d = decisions[0]
         self.assertEqual(d.san, worst[1])
@@ -118,7 +123,7 @@ class ChessAnalysisTests(unittest.TestCase):
     def test_blunder_from_a_real_game_is_flagged(self):
         game, worst = _build_blunder_game()
         self.assertIsNotNone(game)
-        decisions = analysis.find_decisions(game, limit=1, min_ply=0)
+        decisions = analysis.find_decisions(game, limit=1, min_ply=0, use_engine=False)
         self.assertEqual(len(decisions), 1)
         self.assertEqual(decisions[0].san, worst[1])
         self.assertGreaterEqual(decisions[0].mover_loss_cp, 300)
@@ -126,7 +131,7 @@ class ChessAnalysisTests(unittest.TestCase):
     def test_min_ply_hides_opening_blunders(self):
         game, _ = _build_blunder_game()
         self.assertIsNotNone(game)
-        self.assertEqual(analysis.find_decisions(game, limit=5), [])
+        self.assertEqual(analysis.find_decisions(game, limit=5, use_engine=False), [])
 
     def test_mate_is_not_a_blunder(self):
         game = analysis.load_pgn(

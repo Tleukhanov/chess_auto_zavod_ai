@@ -7,25 +7,42 @@ the player who made it.
 
 Evaluation is the hard part, and it degrades honestly:
 
-1. If a Stockfish binary is available it is used. ``SHORTS_CHESS_ENGINE`` points
-   at it; the CLI is probed once and cached.
+1. If a Stockfish binary is available it is used, through python-chess's
+   :mod:`chess.engine` API (see :mod:`shorts_clipper.chess.engine`), one search per
+   position at a fixed depth.
 2. Otherwise a built-in material + piece-square estimate is used, and the
-   returned :class:`Decision` is flagged ``engine=None`` so callers and captions
-   can say "material" rather than pretending it is analysis.
+   returned :class:`Decision` is flagged ``material=True`` so callers and captions
+   can say "material" rather than pretending it is analysis. The same flag is set
+   if an engine is present but cannot be used, so the flag always means what it
+   says.
 
 Both paths are deterministic and never raise: an unreadable PGN returns an empty
 list rather than taking a run down.
+
+**One convention, both paths.** Every evaluation compared here is *white's* point
+of view. Stockfish reports relative to the side to move, so
+:func:`shorts_clipper.chess.engine.analyse` flips it once, on the way out, and
+folds mate into the same centipawn scale. Mixing the two conventions is what
+made the engine path both silent and wrong: comparing "what the mover saw" with
+"what the opponent saw" and subtracting turned every white blunder into a gain and
+doubled every black one.
+
+**Known limit.** A decision is an *eval swing*, not "was there something better".
+The move's own score is never searched, so a quiet mistake that only shows up after
+the opponent's best reply stays invisible (Anderssen's immortal 17...Qxb2 is the
+example), and a move that is winning but dips on the board for a ply is
+over-reported. Both are the price of one search per position instead of one per
+move; fixing them means searching every legal move, which a short render cannot
+afford.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import logging
-import os
-import re
-import shutil
-import subprocess
 from pathlib import Path
+
+from shorts_clipper.chess import engine
 
 log = logging.getLogger(__name__)
 
@@ -66,6 +83,9 @@ class Decision:
     mover_loss_cp: int
     material: bool
     header: dict
+    mate_before: int | None = None
+    mate_after: int | None = None
+    engine_depth: int | None = None
 
     @property
     def lost_piece_value(self) -> float:
@@ -76,8 +96,29 @@ class Decision:
         """Russian side name, so captions never leak the internal enum."""
         return "белые" if self.color == "white" else "чёрные"
 
+    @property
+    def is_mated(self) -> bool:
+        """True when this move walked into a forced mate for the mover.
+
+        ``mate_after`` is white's view in moves, positive when *white* is mating,
+        so the sign only means something once it is read against the mover: white
+        walking into mate is a negative score, black walking into mate is a
+        positive one.
+        """
+        if self.mate_after is None:
+            return False
+        return self.mate_after < 0 if self.color == "white" else self.mate_after > 0
+
+    @property
+    def mate_in(self) -> int | None:
+        """Moves until mate after this move, when this move walked into one."""
+        return abs(self.mate_after) if self.is_mated else None
+
     def caption(self) -> str:
         """Short on-screen line. Pawn-centipawn loss, stated plainly."""
+        if self.is_mated:
+            tail = f"мат через {self.mate_in}" if self.mate_in else "мат"
+            return f"Ход {self.move_number}… {self.san}. {self.side_ru} получили {tail}"
         if self.material:
             body = f"{self.side_ru}: минус {self.lost_piece_value:.1f} за ход"
         else:
@@ -105,34 +146,31 @@ def available() -> bool:
 
 
 def _engine_binary() -> str | None:
-    """Locate a Stockfish binary if one is available."""
-    configured = os.getenv("SHORTS_CHESS_ENGINE", "").strip()
-    if configured and Path(configured).is_file():
-        return configured
-    return shutil.which("stockfish")
+    """Locate a Stockfish binary if one is available.
+
+    Kept as the string-returning shim existing callers expect; the resolution
+    order itself (explicit path, ``PATH``, then the cached download under
+    ``SHORTS_MODELS_DIR``) lives in :mod:`shorts_clipper.chess.engine`.
+    """
+    found = engine.binary()
+    return None if found is None else str(found)
 
 
 _ENGINE_CACHE: dict[str, bool] = {}
 
 
 def has_engine() -> bool:
-    """Whether a real engine is reachable (probed once, cached)."""
+    """Whether a real engine is reachable (probed once, cached per binary).
+
+    Returns ``True`` only for a binary that actually answers UCI, so a stale path
+    in ``SHORTS_CHESS_ENGINE`` or an unrelated file called ``stockfish`` cannot
+    make a run claim it was engine analysis.
+    """
     binary = _engine_binary()
     if binary is None:
         return False
     if binary not in _ENGINE_CACHE:
-        try:
-            proc = subprocess.run(
-                [binary],
-                input="quit\n",
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            _ENGINE_CACHE[binary] = proc.returncode in (0, 1)
-        except Exception:
-            log.debug("Stockfish probe failed for %s", binary, exc_info=True)
-            _ENGINE_CACHE[binary] = False
+        _ENGINE_CACHE[binary] = engine.probe(Path(binary))
     return _ENGINE_CACHE[binary]
 
 
@@ -232,35 +270,50 @@ def material_eval(fen: str) -> int:
     return int(total)
 
 
-_SF_RE = re.compile(r"score (?:cp|mate) ([+-]?\d+)")
+def _shared_positions(before_fens: list[str], after_fens: list[str]) -> list[str] | None:
+    """The positions of a run of plies as one chain, or ``None`` if they are not.
+
+    The position after ply *i* is the position before ply *i+1*, so scoring the
+    before/after pairs separately searches every position of the game twice.
+    Returning the chain lets one search per position answer both sides of every
+    ply: half the engine time, and ``after[i]`` becomes literally the same number
+    as ``before[i+1]``, so a reported loss is the swing between two adjacent
+    positions instead of two independent opinions.
+
+    ``None`` means the two lists were not contiguous, and the caller falls back to
+    scoring them separately rather than pairing up mismatched evals.
+    """
+    chain = list(before_fens)
+    for idx, fen in enumerate(after_fens):
+        if idx + 1 < len(before_fens):
+            if before_fens[idx + 1] != fen:
+                return None
+        else:
+            chain.append(fen)
+    return chain
 
 
-def engine_eval(fens: list[str], depth: int = 14, movetime_ms: int = 200) -> list[int] | None:
-    """Score *fens* with Stockfish, or return ``None`` if it is unavailable."""
-    binary = _engine_binary()
-    if binary is None:
+def _engine_evals(
+    before_fens: list[str],
+    after_fens: list[str],
+    depth: int | None = None,
+    movetime_ms: int | None = None,
+) -> tuple[list[engine.Eval], list[engine.Eval]] | None:
+    """Engine evals for both sides of every ply, or ``None`` if the engine failed.
+
+    Returns white-perspective :class:`shorts_clipper.chess.engine.Eval` objects so
+    that mate stays distinguishable from centipawns all the way to
+    :func:`engine.mover_loss_cp`; the ``cp`` fields are what the material path's
+    arithmetic already assumes.
+    """
+    chain = _shared_positions(before_fens, after_fens)
+    fens = before_fens + after_fens if chain is None else chain
+    scored = engine.analyse(fens, depth_override=depth, movetime_override=movetime_ms)
+    if scored is None or len(scored) != len(fens):
         return None
-    try:
-        lines = ["uci"]
-        for fen in fens:
-            lines += [f"position fen {fen}", f"go depth {depth}"]
-        lines.append("quit")
-        proc = subprocess.run(
-            [binary],
-            input="\n".join(lines) + "\n",
-            capture_output=True,
-            text=True,
-            timeout=max(20, movetime_ms / 1000 * len(fens) * 2),
-        )
-        out: list[int] = []
-        for line in proc.stdout.splitlines():
-            m = _SF_RE.search(line)
-            if m:
-                out.append(int(m.group(1)))
-        return out if len(out) == len(fens) else None
-    except Exception:
-        log.debug("Stockfish evaluation failed", exc_info=True)
-        return None
+    if chain is None:
+        return scored[: len(before_fens)], scored[len(before_fens) :]
+    return scored[:-1], scored[1:]
 
 
 def load_pgn(text: str) -> object | None:
@@ -354,13 +407,23 @@ def find_decisions(
     min_ply: int = DEFAULT_MIN_PLY,
     max_plies: int | None = None,
     limit: int = 3,
-    engine: bool | None = None,
+    use_engine: bool | None = None,
+    depth: int | None = None,
+    movetime_ms: int | None = None,
 ) -> list[Decision]:
     """Rank the moments where a player threw the game away.
 
-    Returns at most *limit* :class:`Decision`, biggest loss first. When an engine
-    is used the evaluation is from the mover's point of view, so a sacrifice that
-    wins material still registers as negative for the opponent, not for the mover.
+    Returns at most *limit* :class:`Decision`, biggest loss first.
+
+    The keyword that used to be called ``engine`` is now ``use_engine``, because
+    ``engine`` is the module that does the searching. Callers that passed
+    ``engine=True/False`` positionally are unaffected; pass ``use_engine=False`` to
+    pin the engine-free path in tests.
+
+    *depth* and *movetime_ms* override ``SHORTS_CHESS_DEPTH`` /
+    ``SHORTS_CHESS_MOVETIME_MS`` for one call. Both evaluations of a ply are
+    white-perspective, so a sacrifice that wins material registers as a gain for
+    whoever played it, not a loss.
     """
     chess = _chess_module()
     if chess is None or game is None:
@@ -372,8 +435,7 @@ def find_decisions(
     if not positions:
         return []
 
-    use_engine = has_engine() if engine is None else engine
-    material_only = not use_engine
+    material_only = not (has_engine() if use_engine is None else use_engine)
 
     before_fens = [p[2].fen() for p in positions]
     after_fens = []
@@ -382,30 +444,51 @@ def find_decisions(
         b.push(move)
         after_fens.append(b.fen())
 
+    engine_evals: tuple[list[engine.Eval], list[engine.Eval]] | None = None
     if material_only:
         before_evals, after_evals = _material_path_evals(chess, before_fens, after_fens)
     else:
-        got_before = engine_eval(before_fens)
-        got_after = engine_eval(after_fens)
-        if got_before is None or got_after is None:
+        engine_evals = _engine_evals(before_fens, after_fens, depth, movetime_ms)
+        if engine_evals is None:
+            # The engine was found but could not be used -- a crash mid-search, a
+            # truncated reply, a binary that will not start. Fall back rather than
+            # report half-analysed positions as analysis.
+            log.debug("engine analysis failed, falling back to the material estimate")
             material_only = True
             before_evals, after_evals = _material_path_evals(chess, before_fens, after_fens)
         else:
-            before_evals, after_evals = got_before, got_after
+            before_evals = [e.cp for e in engine_evals[0]]
+            after_evals = [e.cp for e in engine_evals[1]]
 
     decisions: list[Decision] = []
     for idx, (ply, san, board, move) in enumerate(positions):
         white_to_move = board.turn == chess.WHITE
         before_cp = before_evals[idx]
         after_cp = after_evals[idx]
+        mate_before = None
+        mate_after = None
 
-        # Convert to the mover's point of view: positive is good for them.
-        gain = (after_cp - before_cp) if white_to_move else (before_cp - after_cp)
-        loss = -gain
+        if engine_evals is not None:
+            eval_before, eval_after = engine_evals[0][idx], engine_evals[1][idx]
+            mate_before = eval_before.mate
+            mate_after = eval_after.mate
+            # Convert to the mover's point of view once, here, where the two evals
+            # are known to share a perspective; the material path's own arithmetic
+            # below assumes white's view and never needed flipping.
+            loss = engine.mover_loss_cp(eval_before, eval_after, white_to_move)
+        else:
+            gain = (after_cp - before_cp) if white_to_move else (before_cp - after_cp)
+            loss = -gain
 
-        # A mating attack is worth more than any centipawn number, so never treat
-        # a winning sacrifice as a blunder.
-        if _is_decisive(before_cp, after_cp):
+        # A mating attack is worth more than any centipawn number, so never treat a
+        # winning sacrifice as a blunder. Mate is deliberately *not* swept up by this
+        # rule: "was winning, walked into mate" is exactly the moment a short is
+        # about, and mover_loss_cp already knows how to price it.
+        if _is_decisive(
+            before_cp,
+            after_cp,
+            mate=mate_before is not None or mate_after is not None,
+        ):
             continue
 
         if loss >= critical_cp:
@@ -423,6 +506,9 @@ def find_decisions(
                     mover_loss_cp=int(loss),
                     material=material_only,
                     header=dict(game.headers),
+                    mate_before=mate_before,
+                    mate_after=mate_after,
+                    engine_depth=None if engine_evals is None else engine.depth(depth),
                 )
             )
 
@@ -430,7 +516,16 @@ def find_decisions(
     return decisions[:limit]
 
 
-def _is_decisive(before_cp: int, after_cp: int) -> bool:
-    """True when the position swung from winning to losing (or mate)."""
+def _is_decisive(before_cp: int, after_cp: int, mate: bool = False) -> bool:
+    """True when the position swung from winning to losing (or the reverse).
+
+    800cp is the "clearly winning" line, and a swing across it means the game was
+    decided rather than that one move lost it, so it is not reported. *mate* opts
+    out of the whole rule: a saturated mate score can cross the same line in the
+    most interesting way there is -- a position that was winning becoming one that
+    is being mated -- and that is a real blunder, not a decided game.
+    """
+    if mate:
+        return False
     BIG = 800
     return (before_cp >= BIG and after_cp <= -BIG) or (before_cp <= -BIG and after_cp >= BIG)

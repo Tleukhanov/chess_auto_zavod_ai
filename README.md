@@ -441,21 +441,57 @@ and it is licence-free and deterministic.
 
 ```bash
 pip install -e ".[chess]"      # python-chess + Pillow
-python scripts/make_chess_clip.py data/pgns/game.pgn --out outputs/
+shorts-clipper chess data/pgns/ --count 5
 ```
+
+`shorts-clipper chess` takes PGNs *and* directories (directories recurse for
+`*.pgn`). `--count` is a run-wide budget: every game is analysed first and the
+best N moments across the whole library are cut. Dedup is keyed on
+position+move, so the same blunder is not re-cut on the next run.
+
+```bash
+shorts-clipper chess data/pgns/ --count 10 --critical-cp 300
+shorts-clipper chess game.pgn --no-music
+shorts-clipper chess data/pgns/ --clear-used
+shorts-clipper chess data/pgns/ --continue-on-error
+```
+
+Exit codes follow the batch contract above: `0` when clips were written and
+nothing failed, `1` when any source failed (even with `--continue-on-error`, and
+even if clips landed) or nothing was clipped, `2` for a bad invocation or a
+missing python-chess.
 
 A clip is three beats — the position before the move, the move with its arrow,
 then the position after — because without the before-state a viewer only sees
 that something happened, not that it was wrong.
 
-Evaluation degrades honestly. If a Stockfish binary is found (`SHORTS_CHESS_ENGINE`
-or on `PATH`) it does the scoring; otherwise a material + piece-square estimate
-runs and every result is flagged `Decision.material = True`, so captions can say
-"material" rather than passing it off as analysis. That fallback also folds in
+### Content formats
+
+Three, all deterministic and licence-free:
+
+| Format | Question it answers |
+|---|---|
+| Deciding move | which move lost the game |
+| Opening theory | which line was played, and where it first went wrong |
+| Endgame | what the material is, and what it means |
+
+### Evaluation
+
+Stockfish is downloaded on demand into `models/stockfish/` (98MB, sha256-checked
+against the release digest, gitignored). `SHORTS_CHESS_ENGINE` wins, then a
+binary on `PATH`, then the cached download. Without any engine the
+material + piece-square fallback runs and every result is flagged
+`Decision.material = True`, so nothing passes off an estimate as analysis.
+
+The fallback is genuinely weaker, not merely slower: on the opening of the
+Immortal Game it flags three of Anderssen's *sacrifices* (`g4` 360cp, `Nf5`
+295cp, `Bxf4` 225cp) as losses, while Stockfish flags none. It also folds in
 whatever the opponent can simply take, because a blunder is usually a *quiet*
 move that leaves a piece attacked — a plain before/after comparison sees no
-change at all and finds nothing. Mating attacks and winning sacrifices are never
-flagged as mistakes.
+change at all and finds nothing.
+
+`SHORTS_CHESS_DEPTH` (12) keeps results deterministic; `SHORTS_CHESS_MOVETIME_MS`
+does not, because machine load moves the point where the search stops.
 
 Frames are drawn with PIL rather than SVG, since nothing in the dependency set
 can rasterise SVG. Text and piece glyphs resolve to separate fonts: no single

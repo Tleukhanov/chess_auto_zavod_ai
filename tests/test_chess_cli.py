@@ -104,6 +104,23 @@ class ParserTests(unittest.TestCase):
         self.assertFalse(args.no_music)
         self.assertFalse(args.continue_on_error)
 
+    def test_every_content_format_is_reachable(self):
+        """A format the parser does not accept is a format the factory cannot run."""
+        parser = cli.build_parser()
+        for fmt in ("deciding", "challenge", "opening", "endgame", "highlight"):
+            with self.subTest(fmt=fmt):
+                args = parser.parse_args(["chess", "g.pgn", "--format", fmt])
+                self.assertEqual(args.format, fmt)
+
+        chess_help = parser._subparsers._group_actions[0].choices["chess"].format_help()  # noqa: SLF001
+        for fmt in ("challenge", "opening", "endgame", "highlight"):
+            self.assertIn(fmt, chess_help)
+
+    def test_unknown_format_is_rejected(self):
+        with self.assertRaises(SystemExit) as ctx:
+            cli.build_parser().parse_args(["chess", "g.pgn", "--format", "speedrun"])
+        self.assertEqual(ctx.exception.code, 2)
+
     def test_help_renders(self):
         parser = cli.build_parser()
         self.assertIn("chess", parser.format_help())

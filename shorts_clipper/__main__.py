@@ -618,13 +618,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     chess_p.add_argument(
         "--format",
-        choices=("deciding", "challenge", "opening", "endgame"),
+        choices=("deciding", "challenge", "opening", "endgame", "highlight"),
         default="deciding",
         help=(
             "Content format: 'deciding' cuts the move that lost the game, "
             "'challenge' asks a position as a puzzle (needs the engine), "
             "'opening' names the line and its first mistake, 'endgame' names "
-            "the complex (default: deciding)"
+            "the complex, 'highlight' skims the whole game fast then slows "
+            "down at its worst move (one clip per game) (default: deciding)"
         ),
     )
     chess_p.add_argument(

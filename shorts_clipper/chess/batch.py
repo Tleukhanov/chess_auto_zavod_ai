@@ -31,6 +31,7 @@ anything failed either way.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import logging
 import random
 import re
@@ -381,6 +382,32 @@ def _collect_moments(
                 plan_factory=clip.plan_for_challenge,
             )
             for c in found
+        ]
+
+    if fmt == "highlight":
+        # One clip per game: the whole game is the footage, and it slows down at
+        # its single worst move. Two clips from one game would replay the same
+        # positions twice, which is exactly what the paced format avoids.
+        try:
+            from shorts_clipper.chess import pacing
+        except ImportError:
+            return []
+        worst = analysis.find_decisions(
+            game, critical_cp=critical_cp, min_ply=min_ply, limit=1
+        )
+        if not worst:
+            return []
+        return [
+            Moment(
+                decision=worst[0],
+                source=path,
+                game_index=games_in_file,
+                fmt="highlight",
+                # The paced plan needs the game, not just the decision, because
+                # it walks every ply to build the skim. plan_factory is called
+                # with the decision alone, so the game is bound here.
+                plan_factory=functools.partial(pacing.plan_for_highlight, game),
+            )
         ]
 
     if fmt in ("opening", "endgame"):

@@ -315,6 +315,9 @@ def opening_moment(decision, opening: str | None = None) -> Moment | None:
         fen_after=decision.fen_after,
         color=decision.color,
         caption_text=f"{name}. Ошибка на ходу {decision.move_number}… {decision.san}. минус {value:.1f}",
+        # Carried over so the clip filename names the players; without it the
+        # rendered files came out as "white-black_...".
+        header=dict(getattr(decision, "header", {}) or {}),
     )
 
 

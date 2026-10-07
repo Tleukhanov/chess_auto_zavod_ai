@@ -155,13 +155,30 @@ def _eval_caption(challenge) -> str | None:
     return f"оценка: {value:+.1f}"
 
 
+def _hold_seconds(plan, index: int) -> float:
+    """How long frame *index* is held."""
+    if index == 0:
+        return plan.before_seconds
+    if index == 1:
+        return plan.move_seconds
+    return plan.after_seconds
+
+
 def render_clip(
     plan: ChessClipPlan,
     out_path: str | Path,
     work_dir: str | Path | None = None,
     fps: int = FPS,
 ) -> Path | None:
-    """Render *plan* to an mp4. ``None`` when FFmpeg is unavailable."""
+    """Render *plan* to an mp4. ``None`` when FFmpeg is unavailable.
+
+    Each frame is rendered as its own segment at its own duration and the
+    segments are then concatenated. Doing it in one concat pass does not work:
+    zoompan's ``d`` parameter fixes an output length per input frame and silently
+    overrides the durations in the concat list, which capped every hold at 2s.
+    That matched the deciding-move beats by luck and halved the 4.2s question in
+    the challenge format, so the answer appeared at 2s.
+    """
     import tempfile
 
     from shorts_clipper.utils.ffmpeg_path import ffmpeg_path
@@ -182,49 +199,51 @@ def render_clip(
         work.mkdir(parents=True, exist_ok=True)
 
     try:
-        images = []
+        ffmpeg = ffmpeg_path()
+        segments = []
+        zoom = f"zoompan=z='min(zoom+0.0009,1.10)':d=1:s=1080x1920:fps={fps}"
+
         for i, spec in enumerate(plan.frames):
             png = render_frame(spec, work / f"frame_{i}.png")
-            images.append(png)
+            seconds = max(0.2, float(_hold_seconds(plan, i)))
+            seg = work / f"seg_{i}.mp4"
+            cmd = [
+                ffmpeg, "-y", "-v", "error",
+                "-loop", "1", "-framerate", str(fps), "-t", f"{seconds:.3f}",
+                "-i", str(png),
+                # A silent stereo track is always muxed in: chess clips are
+                # bed-driven in practice, and a video-only mp4 makes the later
+                # mix fail on "[0:a] matches no streams".
+                "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+                "-vf", f"{zoom},format=yuv420p",
+                "-map", "0:v", "-map", "1:a",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-c:a", "aac", "-b:a", "128k", "-shortest",
+                "-r", str(fps),
+                str(seg),
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if proc.returncode != 0:
+                log.error("ffmpeg failed on beat %d: %s", i, (proc.stderr or "")[-600:])
+                return None
+            segments.append(seg)
 
-        ffmpeg = ffmpeg_path()
-        # Concat demuxer keeps the three stills as separate inputs so each can
-        # hold for its own duration; a zoompan filter adds the slow Ken Burns
-        # push that stops a still frame reading as a dead screenshot.
-        concat_file = work / "frames.txt"
-        lines = []
-        for i, png in enumerate(images):
-            dur = (
-                plan.before_seconds if i == 0
-                else plan.move_seconds if i == 1
-                else plan.after_seconds
-            )
-            lines.append(f"file '{png.as_posix()}'")
-            lines.append(f"duration {dur:.3f}")
-        lines.append(f"file '{images[-1].as_posix()}'")
-        concat_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        if not segments:
+            return None
 
-        zoom = (
-            f"zoompan=z='min(zoom+0.0009,1.10)':d={fps * 2}"
-            f":s=1080x1920:fps={fps}"
+        listing = work / "segments.txt"
+        listing.write_text(
+            "".join(f"file '{s.as_posix()}'\n" for s in segments), encoding="utf-8"
         )
         cmd = [
             ffmpeg, "-y", "-v", "error",
-            "-f", "concat", "-safe", "0", "-i", str(concat_file),
-            # A silent stereo track is always muxed in. Chess clips are bed-driven
-            # in practice, and a video-only mp4 makes the later mix fail on
-            # "[0:a] matches no streams" -- which is exactly what happened.
-            "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
-            "-vf", f"{zoom},format=yuv420p",
-            "-map", "0:v", "-map", "1:a",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-            "-c:a", "aac", "-b:a", "128k", "-shortest",
-            "-r", str(fps),
+            "-f", "concat", "-safe", "0", "-i", str(listing),
+            "-c", "copy",
             str(out),
         ]
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if proc.returncode != 0:
-            log.error("ffmpeg failed: %s", (proc.stderr or "")[-800:])
+            log.error("concat failed: %s", (proc.stderr or "")[-600:])
             return None
         log.info("Chess clip written to %s", out)
         return out

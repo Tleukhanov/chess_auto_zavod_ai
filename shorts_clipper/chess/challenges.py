@@ -56,6 +56,8 @@ class Challenge:
     best_cp: int
     runner_up_san: str
     mate_in: int | None = None
+    # PGN headers, so the clip planner can name the players in the filename.
+    header: dict = dataclasses.field(default_factory=dict)
 
     @property
     def side_ru(self) -> str:
@@ -208,6 +210,7 @@ def find_challenges(
                 best_cp=int(best_ev.cp),
                 runner_up_san=second_san,
                 mate_in=mate_distance,
+                header=dict(game.headers),
             )
         )
 

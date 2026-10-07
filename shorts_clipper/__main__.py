@@ -313,6 +313,7 @@ def _cmd_chess(args: argparse.Namespace, settings: Settings) -> int:
             seed=getattr(args, "seed", batch.DEFAULT_SEED),
             continue_on_error=continue_on_error,
             used_file=getattr(args, "used_path", None),
+            fmt=getattr(args, "format", "deciding") or "deciding",
         )
     except batch.ChessBatchError as exc:
         print(f"❌ CHESS BATCH ABORTED — {exc}")
@@ -614,6 +615,17 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="FILE",
         default=None,
         help="Dedup history file (default: data/chess_used.json)",
+    )
+    chess_p.add_argument(
+        "--format",
+        choices=("deciding", "challenge", "opening", "endgame"),
+        default="deciding",
+        help=(
+            "Content format: 'deciding' cuts the move that lost the game, "
+            "'challenge' asks a position as a puzzle (needs the engine), "
+            "'opening' names the line and its first mistake, 'endgame' names "
+            "the complex (default: deciding)"
+        ),
     )
     chess_p.add_argument(
         "--clear-used",

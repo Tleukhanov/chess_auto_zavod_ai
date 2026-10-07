@@ -53,20 +53,32 @@ class ChessBatchError(Exception):
 
 @dataclasses.dataclass(frozen=True)
 class Moment:
-    """One renderable decision plus the game it came from."""
+    """One renderable moment plus the game it came from.
+
+    ``plan_factory`` is what makes several content formats share this pipeline.
+    The deciding-move, opening, endgame and challenge formats all reduce to
+    "an object plus the plan that renders it", so the batch code never learns
+    which format it is cutting -- and ``render_moment`` does not either.
+    """
 
     decision: analysis.Decision
     source: Path
     game_index: int = 0
+    fmt: str = "deciding"
+    plan_factory: object = None
 
     @property
     def key(self) -> str:
-        """Dedup digest: the position before the move plus the move itself."""
+        """Dedup digest. Scoped by format so a challenge and a blunder from the
+        same position are different deliverables."""
+        if self.fmt != "deciding":
+            marker = getattr(self.decision, "fen_before", "") or getattr(self.decision, "fen", "")
+            return script_hash(f"{self.fmt}|{marker}")
         return script_hash(f"{self.decision.fen_before} {self.decision.uci}")
 
     @property
     def label(self) -> str:
-        headers = self.decision.header or {}
+        headers = getattr(self.decision, "header", None) or {}
         white = str(headers.get("White") or "white")
         black = str(headers.get("Black") or "black")
         return f"{white} vs {black}"
@@ -74,11 +86,30 @@ class Moment:
     @property
     def slug(self) -> str:
         """Filesystem-safe ``players-m12-san`` name for the rendered clip."""
-        headers = self.decision.header or {}
+        headers = getattr(self.decision, "header", None) or {}
         white = _slug(str(headers.get("White") or "white"))
         black = _slug(str(headers.get("Black") or "black"))
-        san = _slug(self.decision.san)
-        return f"{white}-{black}_m{self.decision.move_number}_{san}"
+        san = _slug(str(_moment_san(self.decision)))
+        tag = "" if self.fmt == "deciding" else f"_{self.fmt}"
+        return f"{white}-{black}_m{getattr(self.decision, 'move_number', 1)}{tag}_{san}"
+
+    def plan(self):
+        """The clip plan for this moment."""
+        if self.plan_factory is not None:
+            return self.plan_factory(self.decision)
+        return clip.plan_for_decision(self.decision)
+
+    @property
+    def rank(self) -> int:
+        """Sort key for the run-wide ``--count`` budget, best first.
+
+        Challenges are ranked by their eval gap and everything else by mover
+        loss, so a challenge and a blunder stay comparable enough to be mixed in
+        one batch without one format starving the other.
+        """
+        if self.fmt == "challenge":
+            return int(getattr(self.decision, "gap_cp", 0))
+        return int(getattr(self.decision, "mover_loss_cp", 0))
 
 
 @dataclasses.dataclass
@@ -113,6 +144,22 @@ class BatchResult:
 
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _moment_san(decision) -> str:
+    """SAN for a moment, whichever field its format happens to use.
+
+    analysis.Decision and formats.Moment call it ``san``; a challenge holds the
+    answer in ``best_san``, and a null-move endgame moment has neither meaning
+    nor value.
+    """
+    for attr in ("san", "best_san"):
+        value = getattr(decision, attr, None)
+        # A null-move endgame moment carries "—", which slugifies to nothing
+        # useful, so only accept a value with real alphanumeric content.
+        if value and any(ch.isalnum() and ord(ch) < 128 for ch in str(value)):
+            return str(value)
+    return "pos"
 
 
 def _slug(text: str) -> str:
@@ -270,7 +317,7 @@ def render_moment(
     ``index`` only offsets the bed selection so two clips from one game do not
     start on the same bar.
     """
-    plan = clip.plan_for_decision(moment.decision)
+    plan = moment.plan()
     if not plan.frames:
         log.error("no frame plan for %s", moment.label)
         return None
@@ -299,6 +346,120 @@ def render_moment(
     return Path(final)
 
 
+def _collect_moments(
+    fmt: str,
+    game,
+    path: Path,
+    games_in_file: int,
+    critical_cp: int,
+    min_ply: int,
+    limit: int,
+) -> list[Moment]:
+    """Moments of one format from one game.
+
+    Every branch returns the same Moment shape, which is what lets plan_batch
+    stay format-agnostic. A format with nothing to say contributes nothing rather
+    than raising -- no engine means no challenges, and that is a fact to log, not
+    a failure to hide.
+    """
+    headers = dict(getattr(game, "headers", {}) or {})
+
+    if fmt == "challenge":
+        try:
+            from shorts_clipper.chess import challenges
+        except ImportError:
+            return []
+        found = challenges.find_challenges(game, limit=limit, min_ply=min_ply)
+        return [
+            Moment(
+                decision=dataclasses.replace(
+                    c, header=headers
+                ) if hasattr(c, "header") else _with_header(c, headers),
+                source=path,
+                game_index=games_in_file,
+                fmt="challenge",
+                plan_factory=clip.plan_for_challenge,
+            )
+            for c in found
+        ]
+
+    if fmt in ("opening", "endgame"):
+        try:
+            from shorts_clipper.chess import formats
+        except ImportError:
+            return []
+        out: list[Moment] = []
+        if fmt == "opening":
+            name = formats.classify_opening(game)
+            if not name:
+                return []
+            for dec in analysis.find_decisions(
+                game, critical_cp=critical_cp, min_ply=min_ply, limit=limit
+            ):
+                out.append(
+                    Moment(
+                        decision=formats.opening_moment(dec, name),
+                        source=path,
+                        game_index=games_in_file,
+                        fmt="opening",
+                    )
+                )
+        else:
+            for fen, move_number in _endgame_positions(game, min_ply):
+                moment = formats.endgame_moment(fen, move_number=move_number)
+                if moment is not None:
+                    out.append(
+                        Moment(
+                            decision=moment,
+                            source=path,
+                            game_index=games_in_file,
+                            fmt="endgame",
+                        )
+                    )
+        return out
+
+    decisions = analysis.find_decisions(
+        game, critical_cp=critical_cp, min_ply=min_ply, limit=max(limit, 1)
+    )
+    return [
+        Moment(decision=dec, source=path, game_index=games_in_file, fmt="deciding")
+        for dec in decisions
+    ]
+
+
+def _with_header(moment, headers: dict):
+    """Attach PGN headers to a moment that supports them."""
+    if hasattr(moment, "header"):
+        return dataclasses.replace(moment, header=headers)
+    return moment
+
+
+def _endgame_positions(game, min_ply: int, max_take: int = 40):
+    """(fen, move_number) for trailing positions, latest first.
+
+    The window is wide because ``classify_endgame`` only recognises a limited set
+    of material patterns and returns None for anything else -- honestly, but a
+    narrow window means a position worth publishing three plies earlier is
+    missed. Scanning back further lets a recognisable ending be found.
+    """
+    try:
+        import chess  # noqa: F401  (validates that python-chess is importable)
+    except ImportError:
+        return []
+    board = game.board()
+    positions = []
+    moves = list(game.mainline_moves())
+    for i, move in enumerate(moves):
+        if i < min_ply:
+            board.push(move)
+            continue
+        positions.append((board.fen(), i // 2 + 1))
+        board.push(move)
+    positions.append((board.fen(), len(moves) // 2 + 1))
+    positions.reverse()
+    return positions[:max_take]
+
+
 def plan_batch(
     sources: list[Path],
     *,
@@ -306,6 +467,7 @@ def plan_batch(
     critical_cp: int,
     min_ply: int,
     used: set[str],
+    fmt: str = "deciding",
 ) -> tuple[list[Moment], list[SourceResult], int]:
     """Analyse every source and pick the best *count* moments overall.
 
@@ -327,24 +489,23 @@ def plan_batch(
                 "%s holds %d games; analysing the first only", path.name, games_in_file
             )
 
-        decisions = analysis.find_decisions(
-            game, critical_cp=critical_cp, min_ply=min_ply, limit=max(count, 1)
+        moments = _collect_moments(
+            fmt, game, path, games_in_file, critical_cp, min_ply, max(count, 1)
         )
         result = SourceResult(index=i, source=str(path), ok=True, games_in_file=games_in_file)
         fresh = 0
-        for dec in decisions:
-            moment = Moment(decision=dec, source=path, game_index=games_in_file)
+        for moment in moments:
             if moment.key in used:
                 result.skipped_used += 1
                 skipped += 1
-                log.info("already cut, skipping: %s — %s", path.name, dec.caption())
+                log.info("already cut, skipping: %s — %s", path.name, moment.decision.caption())
                 continue
             candidates.append(moment)
             fresh += 1
         result.candidates = fresh
         results.append(result)
 
-    candidates.sort(key=lambda m: m.decision.mover_loss_cp, reverse=True)
+    candidates.sort(key=lambda m: m.rank, reverse=True)
     return candidates[: max(count, 1)], results, skipped
 
 
@@ -361,6 +522,7 @@ def run_batch(
     seed: int = DEFAULT_SEED,
     continue_on_error: bool = False,
     used_file: str | Path | None = None,
+    fmt: str = "deciding",
 ) -> BatchResult:
     """Cut up to *count* chess shorts from a PGN, a directory, or a list of both.
 
@@ -398,6 +560,7 @@ def run_batch(
         critical_cp=critical_cp,
         min_ply=min_ply,
         used=used,
+        fmt=fmt,
     )
 
     # Fail fast *before* rendering: a source that could not be read is reported

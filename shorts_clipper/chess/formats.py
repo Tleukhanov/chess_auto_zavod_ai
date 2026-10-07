@@ -87,6 +87,7 @@ class Moment:
     fen_after: str
     color: str
     caption_text: str
+    header: dict = dataclasses.field(default_factory=dict)
 
     @property
     def side_ru(self) -> str:
@@ -126,13 +127,87 @@ def classify_opening(game) -> str | None:
     return _opening_name(sans)
 
 
+# Russian piece names by piece_type. Kept as literals because python-chess is an
+# optional dependency and may not be importable at module load; the codes are
+# stable (PAWN=1 KNIGHT=2 BISHOP=3 ROOK=4 QUEEN=5 KING=6).
+#
+# Two cases, because "против" governs the genitive: "против слона", never
+# "против слон". Counts are 1 / 2 / 3-4 / 5+.
+_PIECE_WORDS = {
+    5: {
+        "nom": ("ферзь", "два ферзя", "ферзя", "ферзей"),
+        "gen": ("ферзя", "два ферзя", "ферзей", "ферзей"),
+    },
+    4: {
+        "nom": ("ладья", "две ладьи", "ладьи", "ладей"),
+        "gen": ("ладьи", "две ладьи", "ладей", "ладей"),
+    },
+    3: {
+        "nom": ("слон", "два слона", "слона", "слонов"),
+        "gen": ("слона", "два слона", "слонов", "слонов"),
+    },
+    2: {
+        "nom": ("конь", "два коня", "коня", "коней"),
+        "gen": ("коня", "два коня", "коней", "коней"),
+    },
+}
+
+
+def _count_form(form: tuple[str, str, str, str], n: int) -> str:
+    if n == 1:
+        return form[0]
+    if n == 2:
+        return form[1]
+    if n < 5:
+        return f"{n} {form[2]}"
+    return f"{n} {form[3]}"
+
+
+def _piece_words(codes, *, genitive: bool = False) -> str:
+    """Russian noun phrase for a multiset of piece_type codes.
+
+    Built rather than tabulated: a fixed table covered only material on WHITE's
+    side, so "black has a queen, white is bare" returned None -- half of all real
+    endings. It also missed KNN and KNB. This handles any combination from either
+    side, which is what makes the format usable on an arbitrary game.
+
+    *genitive* is for the operand of "против".
+    """
+    counts: dict[int, int] = {}
+    for code in codes:
+        counts[code] = counts.get(code, 0) + 1
+    case = "gen" if genitive else "nom"
+    parts = [
+        _count_form(_PIECE_WORDS[ptype][case], counts[ptype])
+        for ptype in (5, 4, 3, 2)  # strongest first
+        if counts.get(ptype)
+    ]
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return parts[0]
+    # Russian enumeration: commas between all but the last, "и" before the last.
+    return ", ".join(parts[:-1]) + " и " + parts[-1]
+
+
+def _pawn_phrase(defender_pawns: int) -> str:
+    """``против короля`` / ``против короля и пешки`` / ``... и трёх пешек``."""
+    if defender_pawns == 0:
+        return "против короля"
+    if defender_pawns == 1:
+        return "против короля и пешки"
+    if defender_pawns == 2:
+        return "против короля и двух пешек"
+    return f"против короля и {defender_pawns} пешек"
+
+
 def _piece_complex(board) -> str | None:
-    """Russian name of the endgame complex, or ``None`` if not a clear one.
+    """Russian name of the endgame complex, or ``None`` if it is not one.
 
     Compares python-chess ``piece_type`` codes with the kings stripped: PAWN=1,
     KNIGHT=2, BISHOP=3, ROOK=4, QUEEN=5, KING=6. An earlier version compared
-    against material *values* and kept the kings in the lists, so every position
-    returned None.
+    against material *values*, kept the kings in the lists, and only ever named
+    material on White's side.
     """
     chess = _chess()
     if chess is None:
@@ -142,47 +217,29 @@ def _piece_complex(board) -> str | None:
     if not non_pawns:
         return None
 
-    def side(white_side: bool) -> list[int]:
-        return sorted(
-            p.piece_type
-            for p in non_pawns
-            if (p.color == chess.WHITE) == white_side and p.piece_type != chess.KING
-        )
+    white = sorted(
+        p.piece_type for p in non_pawns
+        if p.color == chess.WHITE and p.piece_type != chess.KING
+    )
+    black = sorted(
+        p.piece_type for p in non_pawns
+        if p.color != chess.WHITE and p.piece_type != chess.KING
+    )
+    white_pawns = sum(1 for p in pieces if p.color == chess.WHITE and p.piece_type == chess.PAWN)
+    black_pawns = sum(1 for p in pieces if p.color != chess.WHITE and p.piece_type == chess.PAWN)
 
-    def pawns(white_side: bool) -> int:
-        return sum(
-            1
-            for p in pieces
-            if (p.color == chess.WHITE) == white_side and p.piece_type == chess.PAWN
-        )
+    if not white and not black:
+        return None
 
-    white, black = side(True), side(False)
-    pawn_note = " и пешки" if (pawns(True) or pawns(False)) else ""
-
-    N, B, R, Q = chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN
-    table = {
-        ((), ()): None,
-        ((Q,), ()): f"Ферзь{pawn_note} против короля",
-        ((R,), ()): f"Ладья{pawn_note} против короля",
-        ((B,), ()): f"Слон{pawn_note} против короля",
-        ((N,), ()): f"Конь{pawn_note} против короля",
-        ((R,), (B,)): "Ладья против слона",
-        ((B,), (R,)): "Слон против ладьи",
-        ((Q,), (R,)): "Ферзь против ладьи",
-        ((R,), (Q,)): "Ладья против ферзя",
-        ((Q,), (B,)): "Ферзь против слона",
-        ((B,), (Q,)): "Слон против ферзя",
-        ((B,), (B,)): "Слон против слона",
-        ((N,), (B,)): "Конь против слона",
-        ((B,), (N,)): "Слон против коня",
-        ((N,), (N,)): "Конь против коня",
-        ((R, R), ()): "Две ладьи",
-        ((Q, Q), ()): "Два ферзя",
-        ((R, B), ()): "Ладья и слон против короля",
-        ((Q, R), ()): "Ферзь и ладья против короля",
-    }
-    key = (tuple(white), tuple(black))
-    return table.get(key)
+    if not black:
+        line = f"{_piece_words(white)} {_pawn_phrase(black_pawns)}"
+    elif not white:
+        line = f"{_piece_words(black)} {_pawn_phrase(white_pawns)}"
+    else:
+        # "против" governs the genitive: "против слона", not "против слон".
+        line = f"{_piece_words(white)} против {_piece_words(black, genitive=True)}"
+    # It starts an on-screen caption, so it gets a capital.
+    return line[:1].upper() + line[1:] if line else line
 
 
 def endgame_verdict(board, depth: int = 12) -> str | None:

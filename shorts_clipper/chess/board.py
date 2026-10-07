@@ -22,6 +22,15 @@ log = logging.getLogger(__name__)
 FRAME_W = 1080
 FRAME_H = 1920
 BOARD = 1000
+# Vertical layout. The board used to be centred, which put 460px of empty black
+# above and below it -- measured on a rendered highlight clip, the board
+# occupied 52% of a 9:16 frame and a third of the picture did nothing. The board
+# now sits high and the freed space below becomes the information band.
+HEADER_TOP = 0
+HEADER_HEIGHT = 300
+BOARD_TOP = HEADER_HEIGHT
+INFO_TOP = BOARD_TOP + BOARD + 40
+INFO_HEIGHT = FRAME_H - INFO_TOP
 
 # Muted palette: the board must not fight the caption text for attention.
 LIGHT_SQUARE = (222, 214, 200)
@@ -105,6 +114,37 @@ def _first_font(paths: tuple[str, ...], size: int, probe: str):
 
 
 @dataclasses.dataclass(frozen=True)
+class FrameInfo:
+    """What the viewer is told while the board is on screen.
+
+    Rendered into the band below the board. Every field is optional so a format
+    that only wants one line does not have to blank the rest, and so a caller
+    that passes nothing keeps the old behaviour exactly.
+    """
+
+    hook: str = ""
+    """The headline. What is happening, in a viewer question shape."""
+
+    detail: str = ""
+    """Supporting line under the hook: why the move matters."""
+
+    progress: str = ""
+    """Where we are in the game, e.g. ``24 / 134``."""
+
+    eval_before: str = ""
+    """Evaluation before the move, sign from the mover's side."""
+
+    eval_after: str = ""
+    """Evaluation after it. Together with *eval_before* this is the proof."""
+
+    players: str = ""
+    """Who is playing, e.g. ``Карлусен — Непомнящий``."""
+
+    moved_san: str = ""
+    """The move in algebraic notation, e.g. ``Qd6+``."""
+
+
+@dataclasses.dataclass(frozen=True)
 class FrameSpec:
     """One rendered frame of a board state."""
 
@@ -117,6 +157,10 @@ class FrameSpec:
     # Engine evaluation, shown so the claim on screen is checkable rather than
     # asserted. A chess audience verifies, and a number is what they can check.
     eval_text: str | None = None
+    # The information band below the board. None keeps the frame exactly as it
+    # was before this field existed, so the deciding, opening, endgame and
+    # challenge formats are unaffected.
+    info: FrameInfo | None = None
 
 
 def _accent_color(accent: str):

@@ -40,9 +40,15 @@ class ChessClipPlan:
     before_seconds: float = HOLD_BEFORE
     move_seconds: float = HOLD_MOVE
     after_seconds: float = HOLD_AFTER
+    # Explicit per-frame holds, one per frame. Used by the highlight format,
+    # which runs dozens of frames with wildly different durations; the three
+    # fixed fields cannot express that.
+    holds: list[float] | None = None
 
     @property
     def duration(self) -> float:
+        if self.holds is not None:
+            return float(sum(self.holds))
         return self.before_seconds + self.move_seconds + self.after_seconds
 
 
@@ -157,6 +163,10 @@ def _eval_caption(challenge) -> str | None:
 
 def _hold_seconds(plan, index: int) -> float:
     """How long frame *index* is held."""
+    if plan.holds is not None:
+        if index < len(plan.holds):
+            return float(plan.holds[index])
+        return 0.2
     if index == 0:
         return plan.before_seconds
     if index == 1:
@@ -200,6 +210,39 @@ def render_clip(
 
     try:
         ffmpeg = ffmpeg_path()
+
+        if plan.holds is not None:
+            # A paced plan (skim the game, slow at the decisive move) has dozens
+            # of frames holding a fraction of a second each. Encoding those as
+            # separate segments means zoompan clamps every hold to its own
+            # minimum, so the skim turns into a slideshow. One concat pass with
+            # explicit durations, and no zoompan, keeps the timing exact.
+            listing = work / "paced.txt"
+            lines = []
+            for i, spec in enumerate(plan.frames):
+                png = render_frame(spec, work / f"frame_{i}.png")
+                lines.append(f"file '{png.as_posix()}'")
+                lines.append(f"duration {max(0.08, float(_hold_seconds(plan, i))):.3f}")
+            lines.append(f"file '{(work / f'frame_{len(plan.frames) - 1}.png').as_posix()}'")
+            listing.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            cmd = [
+                ffmpeg, "-y", "-v", "error",
+                "-f", "concat", "-safe", "0", "-i", str(listing),
+                "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+                "-vf", "format=yuv420p",
+                "-map", "0:v", "-map", "1:a",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                "-c:a", "aac", "-b:a", "128k",
+                "-r", str(fps), "-shortest",
+                str(out),
+            ]
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+            if proc.returncode != 0:
+                log.error("paced concat failed: %s", (proc.stderr or "")[-600:])
+                return None
+            log.info("Paced chess clip written to %s", out)
+            return out
+
         segments = []
         zoom = f"zoompan=z='min(zoom+0.0009,1.10)':d=1:s=1080x1920:fps={fps}"
 

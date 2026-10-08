@@ -100,8 +100,20 @@ def _ply_state(pgn: str, ply: int) -> tuple[str, str, str]:
 
 
 def _decision(**kwargs) -> analysis.Decision:
+    """A Decision whose ``ply`` is the **0-based frame index + 1**.
+
+    The keyword is the frame ply, matching the ``ply=`` the caller then passes to
+    :func:`_narrate`. ``analysis.find_decisions`` stores a 1-based ply, so the
+    helper converts on the way in. Building the Decision with the raw frame index
+    instead made every reveal test land one frame late -- and it passed anyway,
+    because narration was then comparing a 0-based index against a 1-based field
+    and so classified every frame as ``lead``. The off-by-one was invisible from
+    inside the test and only visible against a real rendered clip.
+    """
+    kwargs = dict(kwargs)
+    frame_ply = kwargs.pop("ply", 1)
     base = dict(
-        ply=1,
+        ply=int(frame_ply) + 1,
         move_number=1,
         color="white",
         san="e4",

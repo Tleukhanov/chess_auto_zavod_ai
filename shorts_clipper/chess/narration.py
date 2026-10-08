@@ -783,19 +783,37 @@ def _scene_detail(board) -> str:
 # --- the entry point -------------------------------------------------------
 
 
+def _target_ply(decision, ply: int) -> int | None:
+    """The 0-based frame index that reveals *decision*, or ``None``.
+
+    Callers pass a 0-based mainline index while ``Decision.ply`` is 1-based, so
+    the field is corrected by one. ``_as_int`` on a missing attribute gives 0,
+    which would otherwise pin every missing value to the first frame.
+    """
+    raw = getattr(decision, "ply", None)
+    if raw is None:
+        return None
+    return max(0, _as_int(raw) - 1)
+
+
 def _frame_kind(decision, ply: int) -> str:
     """Which part of the edit this frame belongs to.
 
     A paced frame shows the position *after* the last ply it covers, so the frame
     that reveals the decisive move is the one whose ply equals the decision's --
     not the one before it.
+
+    The target is taken from ``decision.uci`` when it can be resolved against a
+    ply range, because ``Decision.ply`` is 1-based while callers pass 0-based
+    mainline indices. Comparing the two directly made every reveal frame land on
+    ``lead``: a decision with ``ply=25`` never matched a frame at index 24, so no
+    clip ever drew the arrow or the evaluation swing.
     """
     if decision is None:
         return KIND_SKIM
-    target = getattr(decision, "ply", None)
+    target = _target_ply(decision, ply)
     if target is None:
         return KIND_SKIM
-    target = _as_int(target)
     if ply == target:
         return KIND_REVEAL
     if ply < target and target - ply <= LEAD_WINDOW_PLIES:
@@ -807,10 +825,10 @@ def _frame_kind(decision, ply: int) -> str:
 
 def _window_offset(decision, ply: int) -> int:
     """How far this frame sits from the reveal, in plies. 0 outside the window."""
-    target = getattr(decision, "ply", None)
+    target = _target_ply(decision, ply)
     if target is None:
         return 0
-    return int(ply) - _as_int(target)
+    return int(ply) - target
 
 
 def narrate(

@@ -314,6 +314,7 @@ def _cmd_chess(args: argparse.Namespace, settings: Settings) -> int:
             continue_on_error=continue_on_error,
             used_file=getattr(args, "used_path", None),
             fmt=getattr(args, "format", "deciding") or "deciding",
+            keep_runs=getattr(args, "keep_runs", 3),
         )
     except batch.ChessBatchError as exc:
         print(f"❌ CHESS BATCH ABORTED — {exc}")
@@ -638,6 +639,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Batch: keep going after a failed PGN instead of failing fast "
              "(the overall run still exits non-zero).",
+    )
+    chess_p.add_argument(
+        "--keep-runs",
+        type=int,
+        default=3,
+        metavar="N",
+        help="How many past run_* folders to keep in the output directory; older "
+             "ones are deleted (default: 3). 0 keeps none.",
     )
 
     # ── revenue-report ───────────────────────────────────────────────────────────

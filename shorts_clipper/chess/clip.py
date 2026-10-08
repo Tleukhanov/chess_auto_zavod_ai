@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 import subprocess
 from pathlib import Path
 
@@ -161,6 +162,27 @@ def _eval_caption(challenge) -> str | None:
     return f"оценка: {value:+.1f}"
 
 
+def _work_root(out: Path) -> str | None:
+    """Where frame PNGs and per-frame segments are written.
+
+    ``SHORTS_CHESS_WORK_DIR`` overrides it. Otherwise the output folder's parent
+    is used, falling back to the system temp directory when that parent is not
+    writable -- returning None makes ``tempfile`` fall back on its own.
+    """
+    override = os.environ.get("SHORTS_CHESS_WORK_DIR")
+    if override:
+        try:
+            Path(override).mkdir(parents=True, exist_ok=True)
+            return override
+        except OSError:
+            log.warning("SHORTS_CHESS_WORK_DIR=%s is not usable", override)
+
+    parent = out.parent
+    if parent.is_dir() and os.access(parent, os.W_OK):
+        return str(parent)
+    return None
+
+
 def _hold_seconds(plan, index: int) -> float:
     """How long frame *index* is held."""
     if plan.holds is not None:
@@ -188,6 +210,13 @@ def render_clip(
     overrides the durations in the concat list, which capped every hold at 2s.
     That matched the deciding-move beats by luck and halved the 4.2s question in
     the challenge format, so the answer appeared at 2s.
+
+    Scratch files live under ``SHORTS_CHESS_WORK_DIR`` (default: the output
+    folder's parent) rather than in the system temp directory. They used to go to
+    ``%TEMP%`` while the finished clips went to the output folder, so the two
+    halves of one job landed on different volumes: with the drive nearly full the
+    frame PNGs failed to write and the render died with no frames and no clue
+    why. Keeping scratch beside the output means one cleanup frees both.
     """
     import tempfile
 
@@ -202,7 +231,7 @@ def render_clip(
 
     tmp_ctx = None
     if work_dir is None:
-        tmp_ctx = tempfile.TemporaryDirectory(prefix="chess_clip_")
+        tmp_ctx = tempfile.TemporaryDirectory(prefix="chess_clip_", dir=_work_root(out))
         work = Path(tmp_ctx.name)
     else:
         work = Path(work_dir)

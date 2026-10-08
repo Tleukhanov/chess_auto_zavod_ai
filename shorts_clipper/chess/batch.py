@@ -35,6 +35,7 @@ import functools
 import logging
 import random
 import re
+import shutil
 from pathlib import Path
 
 from shorts_clipper.chess import analysis, clip
@@ -347,6 +348,39 @@ def render_moment(
     return Path(final)
 
 
+def cleanup_renders(out_dir: str | Path, *, keep_runs: int = 3) -> int:
+    """Delete render folders under *out_dir* except the newest *keep_runs*.
+
+    A batch writes into ``run_<timestamp>`` and nothing ever removed those, so the
+    output folder grew by a full copy of every run forever. With the drive nearly
+    full that stopped the factory outright, not merely got untidy: an ff/pytest
+    failure caused purely by "no space left on device" is a real one.
+
+    Only directories matching the ``run_*`` pattern are touched, and never a file
+    directly under *out_dir* -- an operator who points this at a folder of
+    finished clips gets those clips back untouched.
+    """
+    root = Path(out_dir)
+    if not root.is_dir():
+        return 0
+
+    runs = sorted(
+        (p for p in root.iterdir() if p.is_dir() and p.name.startswith("run_")),
+        key=lambda p: p.name,
+    )
+    removed = 0
+    for stale in runs[:-keep_runs] if keep_runs > 0 else runs:
+        try:
+            shutil.rmtree(stale)
+        except OSError:
+            log.warning("could not remove old render %s", stale, exc_info=True)
+            continue
+        removed += 1
+    if removed:
+        log.info("removed %d old render folder(s) from %s", removed, root)
+    return removed
+
+
 def _collect_moments(
     fmt: str,
     game,
@@ -544,6 +578,7 @@ def run_batch(
     critical_cp: int | None = None,
     min_ply: int | None = None,
     output_dir: str | Path | None = None,
+    keep_runs: int | None = 3,
     music: str | Path | None = None,
     no_music: bool = False,
     seed: int = DEFAULT_SEED,
@@ -573,6 +608,13 @@ def run_batch(
 
     out_dir = Path(output_dir) if output_dir else Path(settings.chess_out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Done before anything is rendered, so the space freed by the old runs is
+    # available to the run that is about to start.
+    if keep_runs is not None:
+        dropped = cleanup_renders(out_dir, keep_runs=keep_runs)
+        if dropped:
+            log.info("cleared %d old render folder(s) from %s", dropped, out_dir)
 
     history = Path(used_file) if used_file else used_path(settings)
     used = load_used_moments(history)

@@ -392,6 +392,25 @@ def limits(depth_override: int | None = None, movetime_override: int | None = No
     return chess_engine.engine.Limit(**kwargs)
 
 
+def _mated_by_engine(chess, info: dict) -> int:
+    """A sign for ``mate 0``, which the engine cannot supply.
+
+    Stockfish reports ``#0`` for the position after the mating move, where the
+    side to move has just been checkmated. Whether that means "white delivered
+    mate" or "black delivered mate" is decided by *who is checkmated*, and the
+    only place that is known is the board itself.
+
+    The checkmated side is the loser. With white to move, black delivered mate and
+    the answer is ``-1``; with black to move, white did and the answer is ``+1``.
+    """
+    board = info.get("_board")
+    if board is None:
+        return 1  # no position: assume the mover is being mated, the safe side
+    white_to_move = board.turn == chess.WHITE
+    mated_side_is_white = not white_to_move  # white mated => black to move
+    return 1 if mated_side_is_white else -1
+
+
 def _eval_from_info(info: dict, chess) -> Eval:
     """Convert one python-chess analysis dict into a white-perspective :class:`Eval`.
 
@@ -404,12 +423,30 @@ def _eval_from_info(info: dict, chess) -> Eval:
     ``bestmove`` in the result of :meth:`play`, not of :meth:`analyse`, but the head
     of the PV is the same move and costs nothing extra.
     """
+    # Read the mate distance from the *relative* score, not from the white-
+    # perspective one. ``mate 0`` means "the side to move is being mated", and
+    # ``pov(WHITE)`` turns a black mate-in-0 into ``mate 0`` -- the same value
+    # white gets for its own mate-in-0 -- so the sign that distinguishes "I am
+    # mating" from "I am being mated" is destroyed exactly where it matters most.
+    # Kept in white perspective and signed there, the same thing reads as
+    # "positive mate = white is mating".
     score = info["score"].pov(chess.WHITE)
-    mate = score.mate()
+    relative = info["score"].relative
+    raw_mate = relative.mate()
+    mate = None
+    if raw_mate is not None:
+        white_mates = info["score"].turn == chess.WHITE
+        mate = int(raw_mate if white_mates else -raw_mate)
+        if mate == 0:
+            # ``mate 0`` has no sign at all: python-chess reports ``#-0`` and
+            # ``#+0`` as the same zero, so the score cannot say whether the side
+            # to move is mating or being mated. It is decided from the position
+            # instead -- if the side to move is checkmated it is being mated.
+            mate = _mated_by_engine(chess, info)
     pv = info.get("pv") or ()
     return Eval(
         cp=int(score.score(mate_score=MATE_CP)),
-        mate=None if mate is None else int(mate),
+        mate=mate,
         depth=int(info.get("depth") or 0),
         best_move=pv[0].uci() if pv else None,
     )
@@ -445,7 +482,11 @@ def analyse(
         out: list[Eval] = []
         try:
             for fen in fens:
-                out.append(_eval_from_info(proc.analyse(chess.Board(fen), limit), chess))
+                board = chess.Board(fen)
+                info = proc.analyse(board, limit)
+                # The board rides along so _eval_from_info can read the position
+                # when the score is ``mate 0`` and carries no sign of its own.
+                out.append(_eval_from_info({**info, "_board": board}, chess))
         except Exception:
             log.debug("engine analysis failed after %d positions", len(out), exc_info=True)
             return None
@@ -528,13 +569,29 @@ def mover_loss_cp(before: Eval, after: Eval, white_to_move: bool) -> int:
     before_cp, before_mate = before.for_mover(white_to_move)
     after_cp, after_mate = after.for_mover(white_to_move)
     raw = before_cp - after_cp
-    if after_mate is not None and after_mate >= 0:
+    # Sign convention, established against a real checkmate: after ``for_mover``,
+    # a positive mate means **the mover is mating**, and a negative one means the
+    # mover is being mated. (White-perspective ``mate 0`` is the degenerate case --
+    # ``#-0`` and ``#+0`` are the same zero -- and is resolved from the board in
+    # ``_eval_from_info``.)
+    #
+    # The code read this backwards, testing ``>= 0`` for "still mating", so a move
+    # that delivered mate in three was priced at :data:`MATE_CP` and sorted first
+    # in every batch: a delivered clip printed "зевок" over the move that ended the
+    # game.
+    mover_mating = after_mate is not None and after_mate > 0
+    mover_mated = after_mate is not None and after_mate < 0
+    if mover_mating:
+        # Delivering mate, or mating more slowly than before: a tempo, never a loss.
         return min(raw, 0)
-    if after_mate is not None and before_mate is not None:
+    if mover_mated and before_mate is not None:
+        # Was already mating and walked into a mate instead: the game was gone
+        # before the move, so this is not where it was lost.
         return min(raw, 0)
-    if after_mate is not None:
+    if mover_mated:
         return MATE_CP
     if before_mate is not None and before_mate > 0:
+        # Had a mate and does not any more: the win was thrown away.
         return MATE_CP
     return int(raw)
 

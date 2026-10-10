@@ -470,6 +470,11 @@ def find_decisions(
 
         if engine_evals is not None:
             eval_before, eval_after = engine_evals[0][idx], engine_evals[1][idx]
+            # Kept in white perspective, signed by which side is mating. Flipping
+            # them into the mover's view here -- which the code did -- meant the
+            # caption reported the opposite of what happened: black's 15...Nxd7,
+            # which leaves black getting mated in two, was stored as mate=-2 and
+            # narrated as black *delivering* that mate.
             mate_before = eval_before.mate
             mate_after = eval_after.mate
             # Convert to the mover's point of view once, here, where the two evals

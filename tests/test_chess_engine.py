@@ -287,8 +287,14 @@ class EvalSemanticsTests(unittest.TestCase):
         self.assertEqual(engine.mover_loss_cp(before, after, white_to_move=False), engine.MATE_CP)
 
     def test_delivering_mate_is_never_a_blunder(self):
+        """White had mate in two and plays it.
+
+        ``mate_after`` is white-perspective, so the move that delivers mate carries
+        a *negative* distance -- the sign that was previously read the other way
+        round, which is what priced the mating move as a 10000cp blunder.
+        """
         before = engine.Eval(cp=engine.MATE_CP - 2, mate=2)
-        after = engine.Eval(cp=engine.MATE_CP, mate=0)
+        after = engine.Eval(cp=engine.MATE_CP, mate=-1)
         self.assertLessEqual(engine.mover_loss_cp(before, after, white_to_move=True), 0)
 
     def test_a_slower_mate_is_a_tempo_not_a_loss(self):
@@ -406,7 +412,10 @@ class AnalysisEngineSemanticsTests(unittest.TestCase):
         target = _ply_of(game, "Rd8#")
         evals = self._flat(len(analysis._positions(game)))
         evals[target] = engine.Eval(cp=engine.MATE_CP - 1, mate=1)
-        evals[target + 1] = engine.Eval(cp=engine.MATE_CP, mate=0)
+        # mate_after is white-perspective: white delivering mate is a *negative*
+        # distance, and the delivered mate-in-0 is normalised to -1 because the
+        # engine's own ``#0`` has no sign.
+        evals[target + 1] = engine.Eval(cp=engine.MATE_CP, mate=-1)
         decisions, _ = self._find(evals, limit=5, min_ply=0)
         self.assertEqual([d for d in decisions if d.san == "Rd8#"], [])
 
@@ -723,13 +732,17 @@ class LiveEngineTests(unittest.TestCase):
         """
         evals = engine.analyse([BLACK_MATED_FEN], depth_override=10)
         self.assertIsNotNone(evals)
-        self.assertEqual(evals[0].mate, 0)
+        # ``mate 0`` carries no sign from the engine -- ``#-0`` and ``#+0`` are the
+        # same zero -- so it is recovered from the position. Black is checkmated, so
+        # white is the one mating and the white-perspective distance is +1.
+        self.assertEqual(evals[0].mate, 1)
         self.assertEqual(evals[0].cp, engine.MATE_CP)
         self.assertNotEqual(evals[0].cp, 0)
-        # Black's view of the same position: still mated, and the mover loses nothing.
+        # Black's view of the same position: black is the mated side.
         black_cp, black_mate = evals[0].for_mover(white_to_move=False)
         self.assertEqual(black_cp, -engine.MATE_CP)
-        self.assertEqual(black_mate, 0)
+        self.assertEqual(black_mate, -1)
+        # Nothing moves, so nothing is lost.
         self.assertEqual(engine.mover_loss_cp(evals[0], evals[0], white_to_move=True), 0)
 
     def test_evals_are_white_perspective_regardless_of_who_is_to_move(self):

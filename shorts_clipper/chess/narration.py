@@ -550,7 +550,9 @@ def _balance_hook(board) -> str:
         return "Пока всё примерно равно"
     if abs(edge) < EDGE_CP:
         return f"{_side_cap('white' if edge > 0 else 'black')} чуть впереди"
-    return f"Перевес у {_side_ru('white' if edge > 0 else 'black')}"
+    # "у белых" not "у белые": the preposition puts the side in the prepositional
+    # case, which the nominative does not survive.
+    return f"Перевес у {_side_prep('white' if edge > 0 else 'black')}"
 
 
 def _skim_hook(board, ply: int) -> str:
@@ -612,12 +614,13 @@ def _reveal_wording(decision, mover: str, after, fen_before: str) -> tuple[str, 
     """
     mate_in = _mover_mate_in(decision, mover)
     if mate_in:
-        # The engine said so. This is the question the whole clip has been
-        # walking towards, so it gets to be the headline.
+        # Walking into a forced mate is the whole game, not a puzzle about spotting
+        # it. Framing it as "это было видно?" -- a question -- makes a blunder that
+        # decided the result read like an exercise, which is the opposite of the
+        # clip's meaning. The question shape is kept for the frames where something
+        # is genuinely hard to see.
         moves = f"{mate_in} {_plural(mate_in, _MOVE_FORMS)}"
-        short = f"Мат через {moves} — это было видно?"
-        hook = short if len(short) <= MAX_HOOK_CHARS else f"Мат через {moves}. Видно?"
-        return hook, f"После этого хода мат через {moves}"
+        return f"Зевок: мат через {moves}", f"Теперь мат. Через {moves}."
 
     # A piece given away for a forced mate is a sacrifice, not a blunder, and the
     # material path cannot tell the two apart. Before calling anything a mistake,
@@ -662,20 +665,29 @@ def _reveal_wording(decision, mover: str, after, fen_before: str) -> tuple[str, 
 def _mover_mate_in(decision, mover: str) -> int | None:
     """Moves until mate after this move, when the mover walked into one.
 
-    ``Decision.mate_after`` is white's view in moves, so a white mover walking into
-    mate is negative and a black mover walking into mate is positive -- the sign
-    only means anything once it is read against the mover, which is the same
-    reading :attr:`analysis.Decision.is_mated` does. A score that says the mover is
-    the one delivering mate returns nothing here: that is a good move, and putting
-    "мат" on the band for it would be the opposite of the truth.
+    ``Decision.mate_after`` is white-perspective and positive when *white* is the
+    side mating, so the mover is the one being mated exactly when the sign disagrees
+    with the mover's colour. A score that names the mover as the one delivering mate
+    returns nothing here: that is a good move, and putting "мат" on the band for it
+    would be the opposite of the truth.
+
+    The earlier version multiplied by the mover's colour, which reads a negative
+    mate as "the mover is mating" -- the same inversion as in
+    :func:`shorts_clipper.chess.engine.mover_loss_cp`. A clip then captioned
+    15...Nxd7 "Мат через 2 хода — это было видно?" when black had just been
+    handed a forced mate in two.
     """
     mate_after = getattr(decision, "mate_after", None)
     if mate_after is None:
         return None
-    signed = _as_int(mate_after) * (1 if mover == "white" else -1)
-    if signed >= 0:
+    value = _as_int(mate_after)
+    if value == 0:
         return None
-    return abs(signed)
+    white_mates = value > 0
+    mover_mates = white_mates if mover == "white" else not white_mates
+    if mover_mates:
+        return None
+    return abs(value)
 
 
 def _mover_loss(decision) -> int | None:

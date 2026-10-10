@@ -233,8 +233,14 @@ class SignConventionTests(unittest.TestCase):
                              mate_after=1)
         frame = _narrate(decision=decision, ply=44, color="black",
                          fen_before=before, fen_after=after)
-        self.assertIn("Мат через 1", frame.info.hook)
-        self.assertIn("?", frame.info.hook, "a mate is the question the clip builds to")
+        # _sentence_case lowercases after the colon, so match case-insensitively.
+        hook = frame.info.hook.lower()
+        self.assertIn("мат через 1", hook)
+        # A blunder that decided the game is stated, not posed as a question to
+        # solve. "это было видно?" reads a lost game as an exercise, and the clip's
+        # meaning is that it was not visible -- it was simply a mistake.
+        self.assertIn("зевок", hook)
+        self.assertNotIn("?", frame.info.hook)
         self.assertEqual(frame.info.eval_after, "-#1")
 
     def test_only_the_reveal_frame_carries_an_evaluation(self):
@@ -266,7 +272,8 @@ class HookTests(unittest.TestCase):
                                  mover_loss_cp=10_000)
             hook = _narrate(decision=decision, ply=20, color="white").info.hook
             self.assertLessEqual(len(hook), narration.MAX_HOOK_CHARS, hook)
-            self.assertIn("Мат", hook)
+            self.assertIn("мат", hook.lower())
+            self.assertIn("зевок", hook.lower())
 
     def test_skim_frame_and_reveal_frame_are_not_the_same_line(self):
         decision = _decision(ply=20, color="white", mover_loss_cp=480)

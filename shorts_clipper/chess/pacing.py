@@ -19,7 +19,11 @@ The clip is three beats, in this order:
 2. **window** -- :data:`SLOW_WINDOW_PLIES` plies either side of the decisive
    move, replayed one frame per move number at :data:`SLOW_SECONDS_PER_PLY` a
    frame, with the decisive ply itself held :data:`DECISIVE_SECONDS`.
-3. **outro** -- the final position, held once.
+3. **no outro.** There used to be one -- the final position, held once. It is gone
+   because it sat 10-15 plies after the decisive move, and once the reveal's own
+   evaluation has said the game is decided, every frame after it is noise. The
+   viewer is handed the answer and then made to watch the rest of it happen. The
+   reveal is the ending.
 
 The trade-off this buys, stated plainly: **the decisive moment is shown twice.**
 The clip is not chronological after the skim; the window is a replay placed at
@@ -61,11 +65,21 @@ log = logging.getLogger(__name__)
 
 # Plies per second while skimming. 48 is fast enough to read as "this is just
 # context": at 6 plies a frame that is 0.125s, or 7.5 positions a second.
+# A skim frame is held long enough to *read*: the clip was delivered at 0.125s a
+# frame, which put a whole 52-ply game through in 1.1s -- fast enough that the
+# viewer could not tell which side was moving, which is the one thing a chess
+# position must convey. 0.35s is roughly the shortest a position can be taken in.
+# It is a floor, not a preference: raising it further makes the game outgrow the
+# short, so the frame *count* is what has to fall as this rises.
+SKIM_SECONDS_PER_FRAME = 0.35
 SKIM_PLIES_PER_SECOND = 48.0
 # Plies per frame while skimming: a full move pair, so one skim frame carries
 # one complete move rather than half of one. More would blur the game into
 # noise; fewer and a long game stops fitting in the frame budget.
-SKIM_PLIES_PER_FRAME = 6
+# Odd, so the skim lands on alternating sides and the turn label flips between
+# frames. At 6 the step was even, every sampled frame showed the same side to move,
+# and a label that never changes reads as a bug rather than as information.
+SKIM_PLIES_PER_FRAME = 7
 # Seconds per ply of context either side of the decisive move. Long enough to
 # read the position the mistake was made in.
 SLOW_SECONDS_PER_PLY = 1.5
@@ -93,6 +107,11 @@ MIN_PIECES_TO_SHOW = 6
 # deficit is absorbed by the frames the viewer is meant to read (see _pad),
 # never by the skim.
 MIN_CLIP_SECONDS = 8.0
+# Upper bound on a clip. The skim floor and the frame cap together decide how long
+# a long game can take, and a 170-ply game skimmed readably overshoots a short
+# badly. When the plan exceeds this the skim is cut back toward the floor, which
+# trades legibility for length only as far as the budget demands.
+MAX_CLIP_SECONDS = 20.0
 # Relative share of a padding deficit each kind of frame absorbs. The skim gets
 # zero: padding the skim is the one thing that would undo it.
 _PAD_WEIGHT = {"skim": 0.0, "window": 2.0, "outro": 1.0}
@@ -201,11 +220,11 @@ def pace_game(
     target = max(0, min(int(target_ply), last_shown))
 
     window = _window(target, last_shown + 1, slow_window)
-    # The final position earns its own held frame only if the game actually
-    # reached it with pieces left, and the window does not already end on it.
-    outro_ply = (
-        last_shown if last_shown == total - 1 and last_shown not in window else None
-    )
+    # No outro. It showed the final position, which sits 10-15 plies after the
+    # decisive move, and once the reveal's own evaluation says the game is
+    # decided every frame after it is noise: the viewer has been told the answer
+    # and is then made to watch the rest of it happen. The reveal is the ending.
+    outro_ply = None
 
     step = max(1, int(skim_plies_per_frame))
     # The skim must not land on the position the outro shows, or the two frames
@@ -223,8 +242,13 @@ def pace_game(
 
     from shorts_clipper.chess.board import FrameSpec
 
+    # The skim takes whichever is slower: the rate the caller asked for, or the
+    # reading floor. ``step`` plies at ``skim_plies_per_second`` was the old rate,
+    # and at 48 ply/s it produced 0.125s frames that no one could read.
     skim_hold = max(
-        MIN_HOLD_SECONDS, step / max(0.001, float(skim_plies_per_second))
+        SKIM_SECONDS_PER_FRAME,
+        MIN_HOLD_SECONDS,
+        step / max(0.001, float(skim_plies_per_second)),
     )
     decisive_hold = max(MIN_HOLD_SECONDS, DECISIVE_SECONDS)
     slow_hold = max(MIN_HOLD_SECONDS, float(slow_seconds_per_ply))
@@ -238,6 +262,10 @@ def pace_game(
         for b in beats
     ]
     holds = _pad(holds, beats, MIN_CLIP_SECONDS)
+    # Readable frames lengthen the clip, so a long game now overshoots. The window
+    # and the outro are the parts that must keep their time; the skim gives way,
+    # and only as far as the ceiling demands.
+    holds, beats = _fit_ceiling(holds, beats, MAX_CLIP_SECONDS)
 
     frames: list[FrameSpec] = []
     for beat in beats:
@@ -321,7 +349,22 @@ def _narrate_beat(*, beat, target, game, fens, total_plies, decision_for=None):
         color=mover,
         headers=getattr(game, "headers", None),
     )
-    return n.info, n.arrow, n.accent
+
+    # Whose move it is. narration names the *mover*; the band has to say whose
+    # turn the position is being shown from, which is the opponent's side once the
+    # move has been played. Taken from the FEN so it cannot disagree with the
+    # board that is actually drawn.
+    from shorts_clipper.chess.clip import turn_label
+
+    headers = getattr(game, "headers", None)
+    side, name = turn_label(fen_after, headers)
+    info = n.info
+    if side:
+        # Narration is frozen, and deliberately so: it is a pure function and a
+        # frozen result is what proves it. The turn comes from the FEN here rather
+        # than from there, so the band is rebuilt rather than mutated.
+        info = dataclasses.replace(info, turn_side=side, turn_name=name)
+    return info, n.arrow, n.accent
 
 
 def fens_san(game, ply: int) -> str:
@@ -513,6 +556,47 @@ def _thin(beats: list[_Beat], max_frames: int, target: int) -> list[_Beat]:
         picked = {(i * last) // (spare - 1) for i in range(spare)}
     keep = {fast[p] for p in picked} | set(slow)
     return [beat for i, beat in enumerate(beats) if i in keep]
+
+
+def _fit_ceiling(
+    holds: list[float], beats: list[_Beat], ceiling: float
+) -> tuple[list[float], list[_Beat]]:
+    """Trim skim frames until the clip fits under *ceiling*.
+
+    The reading floor and the length ceiling pull against each other: 0.35s a skim
+    frame is legible and a 170-ply game cannot fit into a short at that rate. This
+    resolves it in the one place the viewer can afford to lose -- the skim --
+    rather than by capping the frame count at the top, which would cut the tail off
+    the game instead of the middle.
+
+    Returns the trimmed holds and the beats that survived. The window is never
+    dropped: losing the reveal would leave a clip about nothing.
+    """
+    if sum(holds) <= ceiling:
+        return holds, beats
+
+    protected = [b.slow or b.kind == "outro" for b in beats]
+    skims = [i for i, b in enumerate(beats) if not protected[i]]
+    if not skims:
+        return holds, beats
+
+    excess = sum(holds) - ceiling
+    order = sorted(skims, key=lambda i: (-holds[i], i))
+    cut: set[int] = set()
+    for i in order:
+        if excess <= 0:
+            break
+        # Drop the skim frame outright; it is cheaper than showing it too fast to
+        # read, which is the defect being fixed.
+        excess -= holds[i]
+        cut.add(i)
+
+    keep = [i for i in range(len(beats)) if i not in cut]
+    if not any(beats[i].slow for i in keep):
+        # Never remove the reveal, even to fit.
+        keep.append(next(i for i, b in enumerate(beats) if b.slow))
+        keep.sort()
+    return [holds[i] for i in keep], [beats[i] for i in keep]
 
 
 def _pad(holds: list[float], beats: list[_Beat], minimum: float) -> list[float]:

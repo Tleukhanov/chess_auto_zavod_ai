@@ -47,6 +47,10 @@ DETAIL_SIZES = (44, 40, 36, 32)
 MOVE_SIZES = (52, 48, 44, 40, 36, 32)
 PROGRESS_SIZE = 34
 PLAYERS_SIZE = 34
+# Whose move it is. A shade above the players line: it is what the viewer reads
+# first when the board changes, and at 34px next to a 76px hook it was being
+# lost against the background.
+TURN_SIZE = 40
 BOTTOM_TEXT_SIZE = 44
 # Floor for the gap between two band rows. Whatever the rows leave over is shared
 # out above this floor, so the band fills its region instead of leaving behind the
@@ -173,6 +177,19 @@ class FrameInfo:
 
     moved_san: str = ""
     """The move in algebraic notation, e.g. ``Qd6+``."""
+
+    turn_side: str = ""
+    """Whose move it is, e.g. ``ход чёрных``.
+
+    Not decoration. A chess position without the side to move says half of
+    nothing: the same board with the turn flipped is a completely different game
+    state, and a viewer watching a clip with no side named cannot tell a normal
+    move from the opponent walking into something. Rendered next to the board, at
+    the size of the players line.
+    """
+
+    turn_name: str = ""
+    """The player to move. Empty when the name is unknown."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -446,6 +463,9 @@ def _render_info_band(draw, spec: FrameSpec, bottom_limit: int) -> None:
     progress = info.progress.strip()
     players = info.players.strip()
     san = info.moved_san.strip()
+    # Whose move it is, above the players line: which side is playing is the first
+    # thing wanted from a board that has just changed.
+    turn = " · ".join(p for p in (info.turn_side.strip(), info.turn_name.strip()) if p)
     # Coverage is a property of the font file rather than of the size, so it is
     # settled once: an arrow that rendered as tofu would cost more than it said.
     probe_font = _first_font(_TEXT_FONTS, MOVE_SIZES[0], "Х")
@@ -466,6 +486,9 @@ def _render_info_band(draw, spec: FrameSpec, bottom_limit: int) -> None:
     if runs:
         font = _fit_font(draw, "".join(text for text, _ in runs), width, MOVE_SIZES)
         below.append(_band_row(draw, "move", font, runs))
+    if turn:
+        font = _first_font(_TEXT_FONTS, TURN_SIZE, "Х")
+        above.append(_band_row(draw, "turn", font, turn))
     if players:
         font = _first_font(_TEXT_FONTS, PLAYERS_SIZE, "Х")
         below.append(_band_row(draw, "players", font, players))

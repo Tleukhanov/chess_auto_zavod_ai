@@ -21,6 +21,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -160,6 +161,45 @@ def _eval_caption(challenge) -> str | None:
     if challenge.mate_in:
         return f"оценка: мат в {challenge.mate_in}"
     return f"оценка: {value:+.1f}"
+
+
+def turn_label(fen: str, headers=None) -> tuple[str, str]:
+    """``("ходят чёрные", "Demo Black")`` for the position in *fen*.
+
+    Two facts, because one of them is not enough. The side has to be named for the
+    position to mean anything -- the same board with the turn flipped is a
+    completely different game state, and a clip that never says whose turn it is
+    cannot show a normal move and the opponent walking into something
+    differently.
+
+    *fen* is the position **after** the move that was just played, so the side
+    returned is the side to move *next* -- the opponent of whoever just moved.
+    Getting this backwards is invisible in a still frame and only shows up as the
+    arrow contradicting the caption.
+
+    The name is separate so a PGN without players keeps the side, which is the
+    half that carries the meaning. Returns ``("", "")`` for an unparseable FEN
+    rather than guessing.
+    """
+    try:
+        import chess
+    except ImportError:
+        return "", ""
+
+    try:
+        turn = chess.Board(fen).turn
+    except ValueError:
+        return "", ""
+
+    label = "ходят белые" if turn == chess.WHITE else "ходят чёрные"
+    if not headers:
+        return label, ""
+
+    key = "White" if turn == chess.WHITE else "Black"
+    getter = getattr(headers, "get", None)
+    raw = getter(key, "") if callable(getter) else getattr(headers, key, "")
+    name = re.sub(r"\s+", " ", str(raw or "")).strip()
+    return label, name
 
 
 def _work_root(out: Path) -> str | None:

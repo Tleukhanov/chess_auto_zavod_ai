@@ -60,20 +60,19 @@ class HighlightBatchTests(unittest.TestCase):
         self.assertEqual(len(plan.holds), len(plan.frames))
         self.assertAlmostEqual(plan.duration, sum(plan.holds), places=6)
 
-        # The plan stops at the decision the batch actually chose, so the slow
-        # window sits on that move and not on ply zero.
+        # The plan stops at the decision the batch actually chose, so the reveal
+        # lands on that move. The arrow is what marks it: the caption text is
+        # narration's business and has changed more than once.
         self.assertIsInstance(moment.decision.ply, int)
         self.assertGreaterEqual(moment.decision.ply, 0)
         self.assertLess(moment.decision.ply, len(list(game.mainline_moves())))
-        slow_at = [
-            i for i, f in enumerate(plan.frames)
-            if "вот этот ход" in f.top_text
-        ]
-        self.assertEqual(len(slow_at), 1, "no frame marks the decisive move")
+        marked = [f for f in plan.frames if f.arrow is not None]
+        self.assertEqual(len(marked), 1, "no frame marks the decisive move")
+        self.assertEqual(marked[0].info.moved_san, moment.decision.san)
 
-        # The clip has to reach the end of the game, not stop at the window.
-        self.assertEqual(plan.frames[-1].fen, game.end().board().fen())
-        self.assertTrue(chess.Board(plan.frames[-1].fen).is_valid())
+        # Every rendered position has to be a real board, not a half-applied move.
+        for frame in plan.frames:
+            self.assertTrue(chess.Board(frame.fen).is_valid())
 
     @unittest.skipUnless(HAVE_CHESS, "python-chess not installed")
     def test_slug_is_namespaced_and_safe(self):

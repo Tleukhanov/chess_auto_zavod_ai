@@ -209,7 +209,30 @@ class PacingTests(unittest.TestCase):
         frames, holds = pacing.pace_game(self.game, target_ply=17)
 
         self.assertEqual(len(frames), len(holds))
-        self.assertGreater(len(frames), 20, "the game collapsed to too few frames")
+        # Coverage, not a frame count: the skim step is now 7 plies to alternate
+        # the side to move, so 114 plies yields ~17 skim frames rather than the ~29
+        # a 4-ply step gave. What matters is that the whole game is walked -- an
+        # earlier version collapsed 114 plies to 8 frames by re-appending one ply.
+        self.assertGreater(
+            len(frames), 12, "the game collapsed to too few frames"
+        )
+        # Coverage means the *skim* walks the whole game; the clip then ends on the
+        # reveal, which is deliberately a replay of a ply the skim already showed.
+        # There is no outro any more, so the last frame is the window's.
+        skim_progress = [
+            f.info.progress for f in frames if f.accent != "bad" and f.info
+        ]
+        self.assertTrue(skim_progress, "no skim frames")
+        shown = int(skim_progress[-1].split("/")[0])
+        self.assertGreaterEqual(
+            shown,
+            int(self.plies * 0.75),
+            f"the skim only reached ply {shown} of {self.plies}",
+        )
+        # The last frames must be the window, not more skimming.
+        self.assertEqual(
+            frames[-1].accent, "bad", "the clip does not end on the reveal"
+        )
 
         # The last frame must show the last position still worth showing, or
         # the clip either cuts off or spends its tail on a bare king.
@@ -358,22 +381,38 @@ class PacingTests(unittest.TestCase):
         )
 
     def test_skim_reads_as_a_speedrun(self):
-        """The illegibility defect: 0.22s a frame, 4 plies, read as nothing."""
-        self.assertLessEqual(
-            pacing.SKIM_PLIES_PER_FRAME / pacing.SKIM_PLIES_PER_SECOND,
-            0.14,
-            "the skim is too slow to read as a skim",
+        """The skim has to move, and it has to be readable.
+
+        Both halves matter and they conflict. The delivered clip failed the first
+        test that ignored the second: at 0.125s a frame a whole 52-ply game passed
+        in 1.1s, fast enough that the viewer could not tell whose move it was. So
+        the hold is floored at SKIM_SECONDS_PER_FRAME and the *frame count* is what
+        falls as a game grows.
+        """
+        per_frame = pacing.SKIM_PLIES_PER_FRAME / pacing.SKIM_PLIES_PER_SECOND
+        # The requested rate stays a speedrun...
+        self.assertLessEqual(per_frame, 0.20, "the requested skim rate is too slow")
+        self.assertGreaterEqual(per_frame, 0.10)
+        # ...but the delivered hold is floored so a position can be read.
+        self.assertGreaterEqual(pacing.SKIM_SECONDS_PER_FRAME, 0.30)
+
+        # An odd step lands the skim on alternating sides, so the turn label
+        # changes between frames. An even step showed one side throughout, which
+        # reads as a bug rather than as information.
+        self.assertEqual(
+            pacing.SKIM_PLIES_PER_FRAME % 2,
+            1,
+            "an even skim step cannot alternate the side to move",
         )
-        self.assertGreaterEqual(
-            pacing.SKIM_PLIES_PER_FRAME / pacing.SKIM_PLIES_PER_SECOND, 0.10
-        )
-        # A whole move per frame, so each skim frame carries a complete move.
-        self.assertEqual(pacing.SKIM_PLIES_PER_FRAME % 2, 0)
 
         frames, holds = pacing.pace_game(self.game, target_ply=17)
         skim = [holds[i] for i in _skim(frames)]
         self.assertTrue(skim)
-        self.assertTrue(all(0.10 <= h <= 0.14 for h in skim), sorted(set(skim)))
+        # The delivered hold is the readable floor, not the raw requested rate.
+        self.assertTrue(
+            all(h >= pacing.SKIM_SECONDS_PER_FRAME for h in skim),
+            sorted(set(skim)),
+        )
 
     def test_frame_budget_covers_a_long_game(self):
         """Coarser skim steps mean fewer frames, so the budget has to keep up.

@@ -224,10 +224,14 @@ class PacingTests(unittest.TestCase):
         ]
         self.assertTrue(skim_progress, "no skim frames")
         shown = int(skim_progress[-1].split("/")[0])
+        total = int(skim_progress[-1].split("/")[1])
+        # The skim walks the game, then the clip ends on the reveal. The tolerance
+        # is one skim step, since the sample lands on a step boundary rather than
+        # on the final ply.
         self.assertGreaterEqual(
             shown,
-            int(self.plies * 0.75),
-            f"the skim only reached ply {shown} of {self.plies}",
+            total - pacing.SKIM_PLIES_PER_FRAME,
+            f"the skim only reached ply {shown} of {total}",
         )
         # The last frames must be the window, not more skimming.
         self.assertEqual(
@@ -260,21 +264,45 @@ class PacingTests(unittest.TestCase):
             "the decisive move is not actually slower than the skim",
         )
 
+    def test_window_ends_on_the_target(self):
+        """Nothing follows the reveal.
+
+        A trailing window frame sat on the ply that answers the decisive move,
+        which put a neutral skim line ("30 ходов сыграно") on the last image: the
+        clip looked like it ended on bookkeeping instead of on the point. The
+        reveal is the last thing shown.
+        """
+        frames, _ = pacing.pace_game(self.game, target_ply=17, slow_window=2)
+        self.assertEqual(
+            frames[-1].accent, "bad", "the clip does not end on the window"
+        )
+
+        plies = _window_plies(self.game, 17)
+        self.assertEqual(max(plies), 17, "the window renders a ply after the move")
+
+        # pace_game on its own narrates nothing -- no arrow without a decision --
+        # so the marker is checked through the plan, which is what the batch uses.
+        decision = analysis.find_decisions(self.game, limit=1, min_ply=6)
+        if not decision:
+            self.skipTest("no decisive move in the fixture game")
+        plan = pacing.plan_for_highlight(self.game, decision[0])
+        marker = [i for i, f in enumerate(plan.frames) if f.arrow is not None]
+        self.assertEqual(len(marker), 1, "no frame marks the decisive move")
+        self.assertEqual(marker[0], len(plan.frames) - 1, "the reveal is not last")
+
     def test_window_is_centred_on_the_target(self):
         frames, _ = pacing.pace_game(self.game, target_ply=17, slow_window=2)
         slow_positions = _slow(frames)
-        marker = [i for i, f in enumerate(frames) if "вот этот ход" in f.top_text]
 
-        self.assertEqual(len(marker), 1, "exactly one frame names the decisive move")
-        self.assertIn(marker[0], slow_positions)
-
-        # Five plies wide, one frame per move number, so three frames -- the ply
-        # before the mistake, the mistake, the ply a move after it.
+        # One frame per move number, all of them before the move.
         plies = _window_plies(self.game, 17)
         self.assertEqual(len(plies), 3)
-        self.assertEqual(plies[1], 17, "the decisive ply is the middle frame")
-        self.assertLess(max(plies), 17 + 2 + 1)
-        self.assertGreaterEqual(min(plies), 17 - 2 - 1)
+        self.assertEqual(plies[-1], 17, "the decisive ply is the last frame")
+        self.assertEqual(len(set(p // 2 for p in plies)), len(plies))
+        self.assertTrue(slow_positions)
+        # The window reaches back far enough to set the move up, and stops there.
+        self.assertLessEqual(min(plies), 17 - 2)
+        self.assertEqual(max(plies), 17)
 
     def test_window_holds_one_frame_per_move_number(self):
         """The repeat defect: ``24... 24... 24... 25... 25...`` in one clip."""
@@ -311,11 +339,10 @@ class PacingTests(unittest.TestCase):
         target = 16
 
         frames, _ = pacing.pace_game(game, target)
-        decisive = [
-            f for f in frames if "вот этот ход" in f.top_text
-        ]
-        self.assertEqual(len(decisive), 1)
-        self.assertEqual(decisive[0].fen, _fen_after(game, target))
+        decisive = [f for f in frames if f.accent == "bad"]
+        self.assertTrue(decisive, "the window has no frames at all")
+        # The decisive ply is the last window frame.
+        self.assertEqual(decisive[-1].fen, _fen_after(game, target))
 
     def test_reveal_lands_late(self):
         """The anticlimax defect: the payoff, then eight seconds of skimming."""
@@ -325,7 +352,9 @@ class PacingTests(unittest.TestCase):
         target = 30
         frames, holds = pacing.pace_game(game, target)
 
-        reveal = [i for i, f in enumerate(frames) if "вот этот ход" in f.top_text][0]
+        # The window is identified by its accent: the caption moved into the band
+        # and top_text is empty, so "вот этот ход" is no longer the marker.
+        reveal = [i for i, f in enumerate(frames) if f.accent == "bad"][-1]
 
         # The window is a replay placed at the end, so the payoff sits in the
         # last quarter of the clip by frame count whatever the target ply was.

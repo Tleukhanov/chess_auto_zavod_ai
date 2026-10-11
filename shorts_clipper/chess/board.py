@@ -477,6 +477,12 @@ def _render_info_band(draw, spec: FrameSpec, bottom_limit: int) -> None:
     # height is left for them.
     above: list[tuple] = []
     below: list[tuple] = []
+    # One progress counter per frame, not two. ``info.progress`` counts plies
+    # ("58 / 70"); the frame's own top_text counted moves ("30 / 35"), and the
+    # delivered clips showed both at once in different units, reading as two
+    # disagreeing facts about one position. The band owns it now.
+    if not progress:
+        progress = _legacy_progress(spec.top_text)
     if progress:
         font = _first_font(_TEXT_FONTS, PROGRESS_SIZE, "Х")
         above.append(_band_row(draw, "progress", font, progress))
@@ -520,6 +526,23 @@ def _render_info_band(draw, spec: FrameSpec, bottom_limit: int) -> None:
         # the share itself and not the share plus one font's worth of leading.
         nxt = rows[i + 1][2] if i + 1 < len(rows) else 0
         y += row[2] + row[3] + max(1, share - nxt)
+
+
+def _legacy_progress(top_text: str) -> str:
+    """Move counter from the pre-band caption, for frames with no ``info``.
+
+    Formats before the band carried their position in ``top_text`` as ``30 / 35``
+    -- moves, not plies. It is still the only progress on those frames, so it is
+    kept rather than dropped; frames that have a band take their count from
+    ``info.progress`` and never from here.
+    """
+    text = (top_text or "").strip()
+    if "/" not in text:
+        return ""
+    head, _, tail = text.partition("/")
+    if not head.strip().isdigit() or not tail.strip().isdigit():
+        return ""
+    return f"ход {head.strip()} / {tail.strip()}"
 
 
 def render_frame(spec: FrameSpec, out_path: str | Path) -> Path:

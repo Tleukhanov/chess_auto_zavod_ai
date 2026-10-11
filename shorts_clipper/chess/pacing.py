@@ -112,6 +112,9 @@ MIN_CLIP_SECONDS = 8.0
 # badly. When the plan exceeds this the skim is cut back toward the floor, which
 # trades legibility for length only as far as the budget demands.
 MAX_CLIP_SECONDS = 20.0
+# How much history the skim shows before the reveal. 0 means "from the opening",
+# which measured at 40-48% of the runtime spent on plies nobody remembers.
+SKIM_HISTORY_PLIES = 30
 # Relative share of a padding deficit each kind of frame absorbs. The skim gets
 # zero: padding the skim is the one thing that would undo it.
 _PAD_WEIGHT = {"skim": 0.0, "window": 2.0, "outro": 1.0}
@@ -187,6 +190,7 @@ def pace_game(
     slow_window: int = SLOW_WINDOW_PLIES,
     max_frames: int = MAX_FRAMES,
     decision=None,
+    skim_start_ply: int = SKIM_HISTORY_PLIES,
 ):
     """Return (frames, holds) for the whole game with a slow window at *target_ply*.
 
@@ -230,7 +234,15 @@ def pace_game(
     # The skim must not land on the position the outro shows, or the two frames
     # are the same picture back to back.
     skim_stop = last_shown - 1 if outro_ply is not None else last_shown
-    skim = range(0, skim_stop + 1, step)
+    # It starts near the reveal, not at ply 0. Measured on the delivered clips:
+    # 40-48% of the runtime went to the skim, and the first 3.5 seconds were
+    # plies 1-25 -- the opening of a game, sampled at 7-ply intervals, on a board
+    # that still had most of its pieces. A viewer's first three seconds were the
+    # start position, e2e4, e7e5 and nothing else. Cutting that gains three and a
+    # half seconds of dead air on every clip and loses nothing, because the reveal
+    # is the ending.
+    skim_from = max(0, min(int(skim_start_ply), skim_stop))
+    skim = range(skim_from, skim_stop + 1, step)
 
     beats = [_Beat(ply, "skim") for ply in skim]
     beats += [_Beat(ply, "window") for ply in window]
@@ -271,7 +283,12 @@ def pace_game(
     for beat in beats:
         spec = FrameSpec(
             fen=fens[beat.ply],
-            top_text=_caption(beat, target, game, total),
+            # The caption went into the band, which carries its own progress
+            # counter. Leaving a second one in top_text rendered both, in
+            # different units, at the same time -- "30 / 35" beside "58 / 70" on
+            # one board, which reads as a contradiction rather than as two views
+            # of the same ply.
+            top_text="",
             bottom_text="",
             accent="bad" if beat.slow else "neutral",
         )
@@ -411,6 +428,14 @@ def _caption(beat: _Beat, target: int, game, total_plies: int) -> str:
 def _window(target: int, limit: int, half: int) -> list[int]:
     """The plies the slow window renders: at most one frame per move number.
 
+    **Nothing after the decisive move.** The reveal is the last thing the clip
+    shows. A trailing frame on the ply that answers it existed because the window
+    was built symmetrically, and it is exactly what a viewer does not want: by
+    then the evaluation has said the game is decided, so the next board is the
+    story continuing without an audience. Measured on a delivered clip, the
+    closing frame sat two plies past the reveal carrying a neutral skim line
+    ("30 ходов сыграно") -- the clip appeared to end on bookkeeping.
+
     Centred on the decisive move, except when the game runs out first. A window
     that gets clipped by the end of the game used to shrink to two plies, and a
     51-ply game whose worst move was its last one came out as a 4-second clip.
@@ -430,10 +455,10 @@ def _window(target: int, limit: int, half: int) -> list[int]:
     fell from 5 (the whole window) to 0.
     """
     half = max(0, int(half))
-    after = min(half, limit - 1 - target)
-    before = min(half, target)
-    before = min(target, before + (2 * half - before - after))
-    plies = range(target - before, target + after + 1)
+    # No plies after the decisive move: the reveal is the clip's last image, so
+    # whatever length is left is spent on the setup that builds towards it.
+    before = min(target, 2 * half)
+    plies = range(target - before, target + 1)
 
     kept: list[int] = []
     group: list[int] = []
@@ -656,8 +681,9 @@ def plan_for_highlight(
     skim_plies_per_frame: int = SKIM_PLIES_PER_FRAME,
     slow_seconds_per_ply: float = SLOW_SECONDS_PER_PLY,
     slow_window: int = SLOW_WINDOW_PLIES,
+    skim_history: int = SKIM_HISTORY_PLIES,
 ):
-    """A whole-game clip that skims and then slows at the decisive move."""
+    """A clip that skims up to the decisive move, then slows on it."""
     from shorts_clipper.chess.clip import ChessClipPlan
 
     target = resolve_target_ply(game, decision)
@@ -672,6 +698,9 @@ def plan_for_highlight(
         slow_seconds_per_ply=slow_seconds_per_ply,
         slow_window=slow_window,
         decision=decision,
+        # The skim opens just far enough back that the move has some history,
+        # and no further: the opening is the part of a game nobody is waiting for.
+        skim_start_ply=max(0, target - int(skim_history)),
     )
     if not frames:
         return ChessClipPlan(frames=[])

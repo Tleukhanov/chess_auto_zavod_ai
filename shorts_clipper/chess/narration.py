@@ -91,6 +91,11 @@ HANGING_CP = 200
 # Below this the swing is not worth a sentence, so the line stays empty rather
 # than turning 40 centipawns into commentary.
 MIN_CLAIMED_CP = 150
+
+# The engine's saturated "you walked into mate" value. Named here rather than
+# imported so narration keeps no dependency on the engine module at import time;
+# the two must agree or a mate prints as a pawn figure.
+_MATE_SENTINEL = 10_000
 # At or above this the swing is a blunder ("зевок") rather than a miss ("промах"),
 # which is also where analysis.DEFAULT_CRITICAL_CP calls a move critical.
 BLUNDER_CP = 300
@@ -652,6 +657,18 @@ def _reveal_wording(decision, mover: str, after, fen_before: str) -> tuple[str, 
     loss = _mover_loss(decision)
     if loss is None or loss < MIN_CLAIMED_CP:
         return "Вот этот ход — и он проигрывает", ""
+
+    if loss >= _MATE_SENTINEL:
+        # MATE_CP is the sentinel for "walked into mate", not a pawn count.
+        # Dividing it by 100 printed "минус 100.0 за один ход" on screen -- a
+        # figure that cannot exist, on a clip whose whole claim is that its
+        # numbers are checkable. The mate branch above normally catches this, but
+        # it needs a position to read, and a decision can carry the sentinel with
+        # no usable mate distance (an engine that failed, or a synthetic fixture).
+        # Better an unpriced line than a fabricated number.
+        log.warning("narration: mate-sized loss with no mate line, not priced")
+        return "Вот этот ход — и он проигрывает", ""
+
     swing = f"{loss / 100:.1f}"
     if not _engine_backed(decision):
         # The number came from a piece count, not from a search, and must not be

@@ -1,16 +1,15 @@
 """Tests for the highlight pacing.
 
-The format inverts the obvious edit: skim the whole game, then slow down at one
-move. Two bugs lived here long before the current ones, and both are still
-regression tests:
+The format is a lead-in and a window: a short run-up to the decisive move, then
+slow motion through it. Two bugs lived in the old skim for a long time, and both
+are still regression tests:
 
 1. After the slow window the sampler fell into its "a skim step must not cross
    the window" branch and re-appended ``slow_from - 1`` on every iteration. A
    114-ply game collapsed to 8 frames and the tail of the game was never shown.
-   ``test_covers_the_whole_game`` pins the frame count and the last ply.
-2. The plan needed explicit per-frame holds, because three fixed beat durations
-   cannot express "0.125s here, 2.6s there".
-   ``test_slow_frames_are_held_far_longer`` pins the ratio.
+   ``test_the_phase_is_covered`` pins the frame count and the span.
+2. The plan needed explicit per-frame holds, because fixed beat durations cannot
+   express "0.45s here, 2.6s there". ``test_window_frames_are_held_far_longer``.
 3. Thinning with ``[::step]`` yields ``ceil(len/step)`` frames, so a floored step
    overshot the cap: 22 frames for a cap of 20. ``test_frame_cap_is_respected``.
 
@@ -22,10 +21,11 @@ And four more, each of which was a defect measured on a rendered clip:
    ``test_window_holds_one_frame_per_move_number`` and
    ``test_no_adjacent_frames_show_the_same_position`` pin the fix.
 5. The payoff landed at 20% of a 14.3s clip and 8 seconds of skimming followed
-   it. ``test_reveal_lands_late`` pins that nothing but the window follows it.
+   it. ``test_reveal_lands_late`` pins that nothing at all follows it.
 6. The last six seconds were a bare king. ``test_clip_stops_when_the_board_is_empty``.
-7. The skim was 0.22s a frame over 4 plies: long enough to start reading a
-   position, too short to finish. ``test_skim_reads_as_a_speedrun``.
+7. The clip opened at move 1 and the viewer said so: "почему с 1 хода все идет".
+   ``test_the_clip_opens_a_fixed_distance_before_the_move`` and
+   ``test_the_phase_is_the_clip_not_the_game`` pin the fix.
 
 Plus the shape constraints: 8-20s for a short and a long game, deterministic
 output, every hold above the renderer's 0.08s floor.
@@ -132,17 +132,9 @@ def _slow(frames):
     return [i for i, f in enumerate(frames) if f.accent == "bad"]
 
 
-def _outro(frames):
-    """Frames of the held final position, which is neither skim nor window."""
-    return [i for i, f in enumerate(frames) if "финал" in f.top_text]
-
-
-def _skim(frames):
-    return [
-        i
-        for i, f in enumerate(frames)
-        if f.accent != "bad" and "финал" not in f.top_text
-    ]
+def _lead(frames):
+    """Frames of the run-up to the decisive move: neither window nor reveal."""
+    return [i for i, f in enumerate(frames) if f.accent != "bad"]
 
 
 def _placement(fen: str) -> str:
@@ -169,14 +161,15 @@ def _last_shown(game) -> int:
     return pacing._last_worth_showing(counts)
 
 
-def _window_plies(game, target_ply, slow_window: int = 2) -> list[int]:
-    """The plies the emitted slow frames show, read from the plan's own beats.
+def _beat_plies(game, target_ply, **kwargs) -> list[int]:
+    """Every ply the emitted plan shows, read from the plan's own beats.
 
     Positions repeat in a real game, so a FEN does not identify its ply and
-    matching frames back to plies by position silently reads the wrong one.
-    Reading the beats off :func:`pacing._drop_repeats` avoids that, and reading
-    its *return* value means the seam guard is included rather than assumed
-    away.
+    matching frames back to plies by position silently reads the wrong one --
+    on the 300-ply fixture it reports an opening frame on ply 159 that is
+    really on ply 198. Reading the beats off :func:`pacing._drop_repeats` avoids
+    that, and reading its *return* value means the seam guard is included rather
+    than assumed away.
     """
     captured: dict[str, list[int]] = {}
     original = pacing._drop_repeats
@@ -184,19 +177,25 @@ def _window_plies(game, target_ply, slow_window: int = 2) -> list[int]:
     def spy(beats, placements, target):
         kept = original(beats, placements, target)
         captured["slow"] = [b.ply for b in kept if b.slow]
+        captured["all"] = [b.ply for b in kept]
         return kept
 
     pacing._drop_repeats = spy
     try:
-        frames, _ = pacing.pace_game(game, target_ply, slow_window=slow_window)
+        frames, _ = pacing.pace_game(game, target_ply, **kwargs)
     finally:
         pacing._drop_repeats = original
 
     fens = _walk(game)
-    assert [frames[i].fen for i in _slow(frames)] == [
-        fens[ply] for ply in captured["slow"]
+    assert [f.fen for f in frames] == [
+        fens[ply] for ply in captured["all"]
     ], "the beats and the shipped frames disagree"
-    return captured["slow"]
+    return captured
+
+
+def _window_plies(game, target_ply, slow_window: int = 2) -> list[int]:
+    """The plies the emitted slow frames show. See :func:`_beat_plies`."""
+    return _beat_plies(game, target_ply, slow_window=slow_window)["slow"]
 
 
 @unittest.skipUnless(HAVE_CHESS, "python-chess not installed")
@@ -205,35 +204,23 @@ class PacingTests(unittest.TestCase):
         self.game = _random_game()
         self.plies = len(list(self.game.mainline_moves()))
 
-    def test_covers_the_whole_game(self):
+    def test_the_phase_is_covered(self):
+        """Coverage now means "the decisive phase", not "the whole game".
+
+        The old definition was the whole game, and holding it is what produced
+        the clip that opened on the starting position. A lead-in is short by
+        construction, so what is pinned here is the *span*: the clip runs from
+        the run-up's first ply to the decisive ply and not one frame further.
+        """
         frames, holds = pacing.pace_game(self.game, target_ply=17)
 
         self.assertEqual(len(frames), len(holds))
-        # Coverage, not a frame count: the skim step is now 7 plies to alternate
-        # the side to move, so 114 plies yields ~17 skim frames rather than the ~29
-        # a 4-ply step gave. What matters is that the whole game is walked -- an
-        # earlier version collapsed 114 plies to 8 frames by re-appending one ply.
-        self.assertGreater(
-            len(frames), 12, "the game collapsed to too few frames"
+        fens = _walk(self.game)
+        self.assertEqual(
+            frames[0].fen, fens[17 - pacing.LEAD_IN_PLIES], "the run-up moved"
         )
-        # Coverage means the *skim* walks the whole game; the clip then ends on the
-        # reveal, which is deliberately a replay of a ply the skim already showed.
-        # There is no outro any more, so the last frame is the window's.
-        skim_progress = [
-            f.info.progress for f in frames if f.accent != "bad" and f.info
-        ]
-        self.assertTrue(skim_progress, "no skim frames")
-        shown = int(skim_progress[-1].split("/")[0])
-        total = int(skim_progress[-1].split("/")[1])
-        # The skim walks the game, then the clip ends on the reveal. The tolerance
-        # is one skim step, since the sample lands on a step boundary rather than
-        # on the final ply.
-        self.assertGreaterEqual(
-            shown,
-            total - pacing.SKIM_PLIES_PER_FRAME,
-            f"the skim only reached ply {shown} of {total}",
-        )
-        # The last frames must be the window, not more skimming.
+        self.assertEqual(frames[-1].fen, fens[17], "the clip does not end on the move")
+        # And the last frames must be the window, not more run-up.
         self.assertEqual(
             frames[-1].accent, "bad", "the clip does not end on the reveal"
         )
@@ -242,26 +229,48 @@ class PacingTests(unittest.TestCase):
         # the clip either cuts off or spends its tail on a bare king.
         self.assertGreaterEqual(_pieces(frames[-1].fen), pacing.MIN_PIECES_TO_SHOW)
 
-        # And the frame count has to grow with the game, not with the window.
-        short_frames, _ = pacing.pace_game(
-            _random_game(plies=40, seed=7), target_ply=10
-        )
-        self.assertLess(len(short_frames), len(frames))
+    def test_the_clip_opens_a_fixed_distance_before_the_move(self):
+        """"Why does it start at move 1" -- measured back from the move.
 
-    def test_slow_frames_are_held_far_longer(self):
+        The distance is from the decisive ply, never from the start of the game,
+        so it is the same number of plies whether the game is 40 plies or 300.
+        """
+        fens = _walk(self.game)
+        total = len(fens)
+        for target in (17, total // 2, total - 1):
+            with self.subTest(target=target):
+                frames, _ = pacing.pace_game(self.game, target_ply=target)
+                self.assertEqual(
+                    frames[0].fen,
+                    fens[target - pacing.LEAD_IN_PLIES],
+                    "the opening frame is not LEAD_IN_PLIES before the move",
+                )
+
+        # And on a long game the opening frame is deep into it, not ply 0.
+        game = _random_game(plies=300, seed=5)
+        long_fens = _walk(game)
+        frames, _ = pacing.pace_game(game, target_ply=150)
+        self.assertEqual(frames[0].fen, long_fens[150 - pacing.LEAD_IN_PLIES])
+        self.assertNotEqual(
+            frames[0].fen,
+            long_fens[0],
+            "a 300-ply game opened on its first move again",
+        )
+
+    def test_window_frames_are_held_far_longer(self):
         frames, holds = pacing.pace_game(self.game, target_ply=17)
 
         slow = [h for h, f in zip(holds, frames, strict=True) if f.accent == "bad"]
-        skim = [h for h, f in zip(holds, frames, strict=True) if f.accent != "bad"]
+        lead = [h for h, f in zip(holds, frames, strict=True) if f.accent != "bad"]
         self.assertTrue(bool(slow), "no slow frames around the decisive move")
-        self.assertTrue(bool(skim), "no skim frames before the window")
+        self.assertTrue(bool(lead), "no lead-in frames before the window")
 
         slow_each = sum(slow) / len(slow)
-        skim_each = sum(skim) / len(skim)
+        lead_each = sum(lead) / len(lead)
         self.assertGreater(
-            slow_each / skim_each,
+            slow_each / lead_each,
             3.0,
-            "the decisive move is not actually slower than the skim",
+            "the decisive move is not actually slower than the run-up",
         )
 
     def test_window_ends_on_the_target(self):
@@ -356,27 +365,24 @@ class PacingTests(unittest.TestCase):
         # and top_text is empty, so "вот этот ход" is no longer the marker.
         reveal = [i for i, f in enumerate(frames) if f.accent == "bad"][-1]
 
-        # The window is a replay placed at the end, so the payoff sits in the
-        # last quarter of the clip by frame count whatever the target ply was.
+        # The clip is the phase, so the payoff is in its last quarter by frame
+        # count whatever the target ply was.
         self.assertGreater(
             reveal / len(frames),
             0.75,
             "the decisive move is not near the end of the clip",
         )
-        # And nothing skims after it: what follows is the rest of the window
-        # and the held outro, which is the point of putting the window last.
+        # And nothing at all follows it. Not the rest of the window, not a held
+        # final position, not a bookmark.
         self.assertEqual(
-            [i for i in _skim(frames) if i > reveal],
-            [],
-            "the clip returns to the skim after the payoff",
+            reveal,
+            len(frames) - 1,
+            "the clip does not end on the payoff",
         )
-        tail = sum(
-            holds[i] for i in range(reveal + 1, len(frames)) if frames[i].accent != "bad"
-        )
-        self.assertLessEqual(
-            tail,
-            pacing.OUTRO_SECONDS + 1e-6,
-            f"{tail:.2f}s of skimming follows the payoff",
+        self.assertEqual(
+            sum(holds[reveal + 1 :]),
+            0.0,
+            f"{sum(holds[reveal + 1:]):.2f}s follows the payoff",
         )
 
     def test_clip_stops_when_the_board_is_empty(self):
@@ -409,75 +415,121 @@ class PacingTests(unittest.TestCase):
             total - 1 - max(shown), 5, "nothing worth trimming"
         )
 
-    def test_skim_reads_as_a_speedrun(self):
-        """The skim has to move, and it has to be readable.
+    def test_the_run_up_is_one_beat_a_frame(self):
+        """The run-up has to move, and it has to stay on the music.
 
-        Both halves matter and they conflict. The delivered clip failed the first
-        test that ignored the second: at 0.125s a frame a whole 52-ply game passed
-        in 1.1s, fast enough that the viewer could not tell whose move it was. So
-        the hold is floored at SKIM_SECONDS_PER_FRAME and the *frame count* is what
-        falls as a game grows.
+        The old skim ran at 0.35s a frame, which cannot exist on a 0.45s beat
+        grid at all -- it is shorter than a beat, so it either lands between the
+        beats or has to be stretched by a sixth every fourth frame. Paying for
+        that by shortening the reveal is the one thing a short must not do.
+
+        So the run-up is one frame per ply at exactly one beat, and what the
+        format lost in *speed* it made back in *frame count*.
         """
-        per_frame = pacing.SKIM_PLIES_PER_FRAME / pacing.SKIM_PLIES_PER_SECOND
-        # The requested rate stays a speedrun...
-        self.assertLessEqual(per_frame, 0.20, "the requested skim rate is too slow")
-        self.assertGreaterEqual(per_frame, 0.10)
-        # ...but the delivered hold is floored so a position can be read.
-        self.assertGreaterEqual(pacing.SKIM_SECONDS_PER_FRAME, 0.30)
-
-        # An odd step lands the skim on alternating sides, so the turn label
-        # changes between frames. An even step showed one side throughout, which
-        # reads as a bug rather than as information.
-        self.assertEqual(
-            pacing.SKIM_PLIES_PER_FRAME % 2,
-            1,
-            "an even skim step cannot alternate the side to move",
+        beat = 60 / 133
+        self.assertAlmostEqual(
+            pacing.LEAD_IN_SECONDS,
+            round(beat, 2),
+            places=2,
+            msg="a lead-in frame is not one beat at 133 BPM",
         )
+        # Readable as a position, not a flicker.
+        self.assertGreaterEqual(pacing.LEAD_IN_SECONDS, 0.30)
 
         frames, holds = pacing.pace_game(self.game, target_ply=17)
-        skim = [holds[i] for i in _skim(frames)]
-        self.assertTrue(skim)
-        # The delivered hold is the readable floor, not the raw requested rate.
-        self.assertTrue(
-            all(h >= pacing.SKIM_SECONDS_PER_FRAME for h in skim),
-            sorted(set(skim)),
-        )
-
-    def test_frame_budget_covers_a_long_game(self):
-        """Coarser skim steps mean fewer frames, so the budget has to keep up.
-
-        Raising :data:`SKIM_PLIES_PER_FRAME` to make each skim frame carry a whole
-        move is only free if ``MAX_FRAMES * SKIM_PLIES_PER_FRAME`` still spans a
-        long game. Otherwise a 200-ply game silently gets its skim thinned to
-        wider steps and the per-frame hold stops describing what is on screen.
-        """
-        self.assertGreaterEqual(
-            pacing.MAX_FRAMES * pacing.SKIM_PLIES_PER_FRAME,
-            200,
-            "the frame budget can no longer hold a 200-ply game at this step",
-        )
-
-        game = _random_game(plies=200, seed=5)
-        frames, _ = pacing.pace_game(game, target_ply=100)
-        self.assertLessEqual(len(frames), pacing.MAX_FRAMES)
-        # Nothing had to be thinned, so the plan is exactly skim + window.
+        lead = [holds[i] for i in _lead(frames)]
+        self.assertTrue(lead)
         self.assertEqual(
-            len(_skim(frames)) + len(_slow(frames)) + len(_outro(frames)),
-            len(frames),
+            sorted(set(round(h, 3) for h in lead)),
+            [pacing.LEAD_IN_SECONDS],
+            "the run-up drifted off the beat",
         )
 
-    def test_skim_reaches_the_last_position_worth_showing(self):
+    def test_the_phase_is_the_clip_not_the_game(self):
+        """Frame count and length track the phase, not the game's length.
+
+        A 40-ply game and a 300-ply game whose blunders both sit 12 plies before
+        their end come out identical. That is the point of the format: the clip
+        is as long as the decisive phase is long, and the rest of the game costs
+        the viewer nothing at all.
+        """
+        shapes = set()
+        for plies, seed in ((40, 7), (90, 6), (180, 8), (300, 5)):
+            game = _random_game(plies=plies, seed=seed)
+            total = len(list(game.mainline_moves()))
+            target = min(60, total - 1)
+            with self.subTest(plies=plies):
+                frames, holds = pacing.pace_game(game, target_ply=target)
+                shapes.add((len(frames), round(sum(holds), 2)))
+        self.assertEqual(
+            len(shapes),
+            1,
+            f"clip length tracks the game rather than the phase: {sorted(shapes)}",
+        )
+
+    def test_an_over_long_run_up_is_capped_not_speeded_up(self):
+        """Length pressure must cost frames, not legibility.
+
+        The frame cap and the length ceiling between them decide what a caller
+        who asks for a 200-ply run-up gets. It has to be a shorter clip at the
+        same readable hold, never the same clip played faster.
+        """
+        game = _random_game(plies=300, seed=5)
+        frames, holds = pacing.pace_game(game, target_ply=200, lead_in_plies=200)
+
+        self.assertLessEqual(len(frames), pacing.MAX_FRAMES)
+        self.assertEqual(len(frames), len(holds))
+        self.assertEqual(frames[-1].accent, "bad", "the cap removed the reveal")
+        lead = [holds[i] for i in _lead(frames)]
+        self.assertTrue(lead)
+        self.assertTrue(
+            all(h >= pacing.LEAD_IN_SECONDS for h in lead),
+            sorted(set(lead)),
+        )
+        self.assertLessEqual(sum(holds), pacing.MAX_CLIP_SECONDS + 1e-6)
+
+    def test_the_run_up_covers_the_whole_phase(self):
+        """The run-up reaches the window, and nothing sits past the move.
+
+        The clip is a stretch of the game ending on the decisive ply, and the
+        only plies allowed to be missing from it are the ones the repeat guard
+        dropped because the board did not change -- a viewer cannot tell those
+        apart, so showing them costs a frame and says nothing.
+        """
         game = _random_game(plies=200, seed=5)
-        frames, _ = pacing.pace_game(game, target_ply=100)
+        target = 100
+        frames, _ = pacing.pace_game(game, target_ply=target)
         fens = _walk(game)
-        last_shown = _last_shown(game)
+        plies = _beat_plies(game, target)
+        shown = plies["all"]
 
-        skim_ply = fens.index(frames[_skim(frames)[-1]].fen)
-        self.assertLessEqual(
-            last_shown - skim_ply,
-            pacing.SKIM_PLIES_PER_FRAME - 1,
-            "the skim stops short of the position the clip is supposed to reach",
+        self.assertEqual(shown[-1], target, "the clip does not end on the move")
+        self.assertEqual(max(shown), target, "a frame sits after the decisive ply")
+        # Every frame is inside the phase: nothing before the run-up, nothing
+        # after the move.
+        self.assertGreaterEqual(
+            min(shown),
+            target - pacing.LEAD_IN_PLIES,
+            "a frame sits outside the decisive phase",
         )
+        self.assertEqual(
+            shown,
+            sorted(shown),
+            "the clip is not in ply order",
+        )
+        # The run-up reaches the window: no gap between the last lead-in frame
+        # and the first window frame wider than the window's own reach.
+        lead_last = max(p for p in shown if p not in plies["slow"])
+        self.assertLessEqual(
+            min(plies["slow"]) - lead_last,
+            2 * pacing.SLOW_WINDOW_PLIES,
+            "there is a gap between the run-up and the window",
+        )
+        # And the piece rule still clamps a decisive move that lands in the
+        # tail the clip is not allowed to reach.
+        self.assertGreaterEqual(_last_shown(game), target)
+        frames, _ = pacing.pace_game(game, target_ply=_last_shown(game) + 25)
+        self.assertEqual(frames[-1].fen, fens[_last_shown(game)])
 
     def test_clip_length_stays_shorts_shaped(self):
         for plies, seed in ((40, 7), (200, 31)):

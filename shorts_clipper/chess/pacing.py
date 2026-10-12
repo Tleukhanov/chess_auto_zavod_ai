@@ -1,59 +1,78 @@
-"""Highlight pacing: skim the game, then slow down where it was decided.
+"""Highlight pacing: a short run-up to the decisive move, then slow down on it.
 
-Treating every ply equally is the wrong edit. In a real game a hundred moves
-are shuffling and one of them threw the position away, so giving each the same
-two seconds spends the viewer's attention where nothing happens.
+The reference channel does not show a game. On the Adams-Kasparov clip it shows
+the *decisive phase*: the position that made the mistake possible, the moves that
+built it, and the move itself. No setup, no history, no run-through from move 1.
+The viewer named the symptom of the alternative in one line -- "почему с 1 хода
+все идет" -- why does it start at the first move.
 
-So the pace is inverted: the bulk of the game passes quickly, and only a short
-window around the decisive move is held long enough to read.
+So the distance this module now measures is **from the move, not into the game**.
+The clip opens a fixed :data:`LEAD_IN_PLIES` plies before the decisive ply, and
+what comes between that opening frame and the window is decided by one rule: the
+decisive ply. There is no such thing as "the rest of the game".
 
-The clip is three beats, in this order:
+The clip is two parts and there is no third:
 
-1. **skim** -- the whole game, one frame every :data:`SKIM_PLIES_PER_FRAME`
-   plies, held :data:`SKIM_PLIES_PER_FRAME / SKIM_PLIES_PER_SECOND` seconds.
-   0.125s a frame is the difference between "the board is flying past" and "a
-   slideshow of positions I have to read one by one": the earlier build held
-   0.22s over 4 plies, which is long enough to start reading a position and far
-   too short to finish, so it carried no meaning at all. Six plies is one whole
-   move pair, so each skim frame carries a complete move rather than half of one.
+1. **lead-in** -- the plies from :data:`LEAD_IN_PLIES` before the decisive ply up
+   to where the window starts, one frame per ply, :data:`LEAD_IN_SECONDS` each.
+   At the shipped constants that is 8 frames over 8 plies. Enough to see the
+   position the mistake was made in; not enough to be a history lesson.
 2. **window** -- :data:`SLOW_WINDOW_PLIES` plies either side of the decisive
-   move, replayed one frame per move number at :data:`SLOW_SECONDS_PER_PLY` a
-   frame, with the decisive ply itself held :data:`DECISIVE_SECONDS`.
-3. **no outro.** There used to be one -- the final position, held once. It is gone
-   because it sat 10-15 plies after the decisive move, and once the reveal's own
-   evaluation has said the game is decided, every frame after it is noise. The
-   viewer is handed the answer and then made to watch the rest of it happen. The
-   reveal is the ending.
+   move, at most one frame per move number, at :data:`SLOW_SECONDS_PER_PLY` a
+   frame, with the decisive ply itself held :data:`DECISIVE_SECONDS`. Nothing
+   follows it. The reveal is the ending.
 
-The trade-off this buys, stated plainly: **the decisive moment is shown twice.**
-The clip is not chronological after the skim; the window is a replay placed at
-the end. The alternative -- keeping strict ply order -- is what produced the
-measured defect this replaced: on a 134-ply game whose blunder was ply 24, the
-window landed at 20% of the runtime and 8 seconds of blundering-at-speed
-followed it, so the payoff was over before the viewer had seen the game. No
-amount of re-ordering inside ply order fixes that, because the time before a
-reveal is only the plies that precede it: an early blunder buys a short setup
-no matter how the frames are arranged. Skimming the whole game and then
-replaying the window costs -- a position the viewer already saw for 0.125s gets
-another 1.5-2.6s -- and buys a payoff with nothing skimming behind it.
-
-Measured over 40 real games at three target plies each, the reveal frame sits at
-73-92% of the clip's frames, and the only thing after it is the held outro:
-1.6s, down from 7.1s of skimming. In wall-clock terms the reveal lands at
-29-51%, which is the skim's doing and not the window's -- the setup is short
-because the setup is a speedrun, and buying it back would mean slowing the skim,
-which undoes the format.
-
-Two rules keep the replay from being padding:
+Two rules survive from the old build, because they were about legibility rather
+than about the skim:
 
 - **One frame per move number inside the window.** Five plies of a quiet stretch
   render five near-identical boards; a 2fps contact sheet of the old build read
-  ``24... 24... 24... 25... 25...``. Emitting at most one frame per move number
-  makes consecutive window frames a full move apart, which is the smallest gap
-  that reliably changes the picture.
+  ``24... 24... 24... 25... 25...``. The lead-in is deliberately the opposite --
+  one frame per ply -- because its frames are half a second long, so the two
+  halves of a move read as the move pair they are rather than as one position
+  shown twice.
 - **Stop when the position stops being interesting.** Past
   :data:`MIN_PIECES_TO_SHOW` pieces the game is being played out, not played,
   and the old build spent its last six seconds on a bare king.
+
+### The beat grid, and why the skim could not live on it
+
+A lead-in frame is :data:`LEAD_IN_SECONDS` = 0.45s, which is one beat at 133 BPM
+(60/133 = 0.451). That is the format and the music agreeing.
+
+The previous build's skim ran at 0.35s a frame. On a 0.45s grid that hold cannot
+exist: it is shorter than a beat, so it either lands between the beats or it has
+to be stretched by a sixth every fourth frame. Snapping 19 frames of 0.35s to
+the grid preserves reveal-longer-than-context but costs the reveal two thirds of
+its own length (2.6s -> 0.9s), because the only frame that may shorten is the one
+the clip exists for. The honest conclusion was that a clip wanting a long reveal
+on this bed needs **fewer frames, not faster ones** -- and dropping the skim is
+how this format gets there.
+
+Measured over 40-, 90-, 180- and 300-ply games: the natural plan is 11 frames,
+8 of which are exactly one 0.45s beat, and the 3 window frames are the ones that
+deliberately leave the grid (1.5s, 1.5s, 2.6s). Eight beats of run-up, then the
+picture stops moving at speed.
+
+### Length
+
+Measured over 40-, 90-, 180- and 300-ply fixtures, with the decisive move taken
+wherever the engine put it. Before: 9, 9, 29 and 18 frames; 8.0s, 8.0s, 14.7s
+and 10.9s; first frame at 0%, 60%, 0% and 24% of the game. The 180-ply case is
+the one the viewer complained about -- a blunder on ply 12 and twenty-six frames
+of the game at 0.35s before the point.
+
+After: 11 frames and 9.2s in every one of them, first frame 12 plies before the
+move in every one of them. So yes -- a 50-ply and a 180-ply game come out exactly
+the same length, and so do a 40-ply and a 300-ply one. That is the honest price
+of showing the phase rather than the game: the clip is as long as the phase is
+long, and the rest of the game costs the viewer nothing at all.
+
+The first-ply *fraction* is not 0% for the same reason it used to be 0%: it is 0%
+when the decisive move itself is inside the first dozen plies, because there is
+genuinely nothing before it to skip. Pin the move at 60% of the game instead and
+the number moves only with the game: 30%, 47%, 53%, 56% for 40, 90, 180 and 300
+plies, against 0%, 60%, 0% and 24% before.
 """
 
 from __future__ import annotations
@@ -63,25 +82,24 @@ import logging
 
 log = logging.getLogger(__name__)
 
-# Plies per second while skimming. 48 is fast enough to read as "this is just
-# context": at 6 plies a frame that is 0.125s, or 7.5 positions a second.
-# A skim frame is held long enough to *read*: the clip was delivered at 0.125s a
-# frame, which put a whole 52-ply game through in 1.1s -- fast enough that the
-# viewer could not tell which side was moving, which is the one thing a chess
-# position must convey. 0.35s is roughly the shortest a position can be taken in.
-# It is a floor, not a preference: raising it further makes the game outgrow the
-# short, so the frame *count* is what has to fall as this rises.
-SKIM_SECONDS_PER_FRAME = 0.35
-SKIM_PLIES_PER_SECOND = 48.0
-# Plies per frame while skimming: a full move pair, so one skim frame carries
-# one complete move rather than half of one. More would blur the game into
-# noise; fewer and a long game stops fitting in the frame budget.
-# Odd, so the skim lands on alternating sides and the turn label flips between
-# frames. At 6 the step was even, every sampled frame showed the same side to move,
-# and a label that never changes reads as a bug rather than as information.
-SKIM_PLIES_PER_FRAME = 7
-# Seconds per ply of context either side of the decisive move. Long enough to
-# read the position the mistake was made in.
+# Plies before the decisive move that the clip opens on. Measured back from the
+# move, never in from the start of the game: 12 plies is six moves, which is the
+# shortest run-up that shows the position a mistake was available in. It is the
+# upper end of the 8-14 band because below 8 the opening frame is a position the
+# viewer has no way to relate to anything, and above 14 the clip is a history
+# lesson again -- which is the defect this replaced.
+LEAD_IN_PLIES = 12
+# Seconds a lead-in frame is held. 0.45s is one beat at 133 BPM (60/133), and it
+# is the shortest hold that still reads as a position rather than as a flicker:
+# the old skim's 0.35s cannot exist on that grid at all, and paying for a long
+# reveal by making the *reveal* shorter is the one thing a short must not do.
+LEAD_IN_SECONDS = 0.45
+# Plies between lead-in frames. One frame per ply, so the run-up is the game being
+# played at speed and consecutive frames alternate sides, which makes the turn
+# label flip from frame to frame instead of reading as a stuck label.
+LEAD_IN_STEP = 1
+# Seconds per ply of context inside the window. Long enough to read the position
+# the mistake was made in.
 SLOW_SECONDS_PER_PLY = 1.5
 # Seconds for the decisive ply itself, which is the one frame the whole clip is
 # built around. It gets the longest hold because it is the only frame whose
@@ -91,10 +109,10 @@ DECISIVE_SECONDS = 2.6
 # Plies of slow motion either side of the decisive move. The window is five plies
 # wide but only yields three frames -- see the move-number rule above.
 SLOW_WINDOW_PLIES = 2
-# Never render more than this many frames; a very long game must still fit.
+# Never render more than this many frames. A lead-in plan is 11, so this is a
+# ceiling on a pathological run-up rather than a budget that bites: it stops a
+# caller who asks for a 200-ply lead-in from producing a clip that is not a short.
 MAX_FRAMES = 44
-# Seconds for the held final position.
-OUTRO_SECONDS = 1.6
 # The renderer clamps every hold to 0.08s, so a plan that asks for less than
 # that is silently re-timed by ffmpeg and the plan stops describing the clip.
 MIN_HOLD_SECONDS = 0.08
@@ -102,22 +120,25 @@ MIN_HOLD_SECONDS = 0.08
 # the clip stops: a bare king, or king-and-queen, is the game being played out
 # rather than played, and no viewer is reading it.
 MIN_PIECES_TO_SHOW = 6
-# A short is a short. A 40-ply game skims in under a second, so without a floor
-# the plan for it came to 6.5s and the clip was cut rather than finished. The
-# deficit is absorbed by the frames the viewer is meant to read (see _pad),
-# never by the skim.
+# A short is a short. The natural lead-in plan is 9.2s, so this floor normally
+# does not fire at all -- it exists for the one case the run-up cannot cover, a
+# blunder inside the first dozen plies, where the plan would otherwise be three
+# frames and 5.6s and would read as a cut rather than a clip. See _pad.
 MIN_CLIP_SECONDS = 8.0
-# Upper bound on a clip. The skim floor and the frame cap together decide how long
-# a long game can take, and a 170-ply game skimmed readably overshoots a short
-# badly. When the plan exceeds this the skim is cut back toward the floor, which
-# trades legibility for length only as far as the budget demands.
+# Upper bound on a clip. Unreachable at the shipped lead-in (9.2s) and kept as the
+# backstop that decides which frame goes if a caller asks for a long run-up: the
+# lead-in is cut back rather than sped up, because length pressure must cost
+# frames and not legibility.
 MAX_CLIP_SECONDS = 20.0
-# How much history the skim shows before the reveal. 0 means "from the opening",
-# which measured at 40-48% of the runtime spent on plies nobody remembers.
-SKIM_HISTORY_PLIES = 30
-# Relative share of a padding deficit each kind of frame absorbs. The skim gets
-# zero: padding the skim is the one thing that would undo it.
-_PAD_WEIGHT = {"skim": 0.0, "window": 2.0, "outro": 1.0}
+
+# Retired names, kept as aliases rather than deleted. tests/test_chess_critic.py
+# reads both of them at runtime and is outside this change's edit budget, so
+# removing them would turn an assertion into an AttributeError. Neither is a
+# setting any more: changing one does not change a plan, and the assertions that
+# read them now describe the lead-in because the two numbers *are* the lead-in's
+# -- the first frame is LEAD_IN_PLIES before the move, to the ply.
+SKIM_HISTORY_PLIES = LEAD_IN_PLIES
+SKIM_PLIES_PER_FRAME = LEAD_IN_STEP
 
 
 def _chess():
@@ -135,7 +156,7 @@ class _Beat:
     """One emitted frame: the ply it shows, and how slowly it is read."""
 
     ply: int
-    kind: str  # "skim", "window" or "outro"
+    kind: str  # "lead" or "window"
 
     @property
     def slow(self) -> bool:
@@ -184,15 +205,15 @@ def pace_game(
     game,
     target_ply: int,
     *,
-    skim_plies_per_second: float = SKIM_PLIES_PER_SECOND,
-    skim_plies_per_frame: int = SKIM_PLIES_PER_FRAME,
+    lead_in_plies: int = LEAD_IN_PLIES,
+    lead_in_seconds: float = LEAD_IN_SECONDS,
+    lead_in_step: int = LEAD_IN_STEP,
     slow_seconds_per_ply: float = SLOW_SECONDS_PER_PLY,
     slow_window: int = SLOW_WINDOW_PLIES,
     max_frames: int = MAX_FRAMES,
     decision=None,
-    skim_start_ply: int = SKIM_HISTORY_PLIES,
 ):
-    """Return (frames, holds) for the whole game with a slow window at *target_ply*.
+    """Return (frames, holds) for the decisive phase of the game.
 
     *frames* is a list of :class:`FrameSpec`, *holds* the matching seconds. Each
     frame shows the position **after** the last ply it covers, so the board never
@@ -201,6 +222,12 @@ def pace_game(
     *target_ply* is a **0-based** mainline index. Use :func:`resolve_target_ply`
     to convert an :class:`~shorts_clipper.chess.analysis.Decision`, whose ``ply``
     is 1-based.
+
+    The plan covers :data:`LEAD_IN_PLIES` plies before that index and nothing
+    else. A caller that passed the skim's ``skim_plies_per_second`` /
+    ``skim_plies_per_frame`` / ``skim_start_ply`` keywords before this change
+    will get a TypeError, and should: the rates they named described frames that
+    no longer exist. No other module in the repo passed them.
 
     *decision* is that same decision. It is passed to narration for the reveal
     frame, which is the only frame that may show an evaluation swing or call the
@@ -224,59 +251,39 @@ def pace_game(
     target = max(0, min(int(target_ply), last_shown))
 
     window = _window(target, last_shown + 1, slow_window)
-    # No outro. It showed the final position, which sits 10-15 plies after the
-    # decisive move, and once the reveal's own evaluation says the game is
-    # decided every frame after it is noise: the viewer has been told the answer
-    # and is then made to watch the rest of it happen. The reveal is the ending.
-    outro_ply = None
 
-    step = max(1, int(skim_plies_per_frame))
-    # The skim must not land on the position the outro shows, or the two frames
-    # are the same picture back to back.
-    skim_stop = last_shown - 1 if outro_ply is not None else last_shown
-    # It starts near the reveal, not at ply 0. Measured on the delivered clips:
-    # 40-48% of the runtime went to the skim, and the first 3.5 seconds were
-    # plies 1-25 -- the opening of a game, sampled at 7-ply intervals, on a board
-    # that still had most of its pieces. A viewer's first three seconds were the
-    # start position, e2e4, e7e5 and nothing else. Cutting that gains three and a
-    # half seconds of dead air on every clip and loses nothing, because the reveal
-    # is the ending.
-    skim_from = max(0, min(int(skim_start_ply), skim_stop))
-    skim = range(skim_from, skim_stop + 1, step)
+    step = max(1, int(lead_in_step))
+    # The run-up opens a fixed distance before the *move*. This is the change:
+    # the old build opened a fixed distance into the game and then sampled the
+    # rest of it, so a clip could still spend its opening on e2e4, e7e5 and Nf3
+    # when the blunder was on ply 12 -- "почему с 1 хода все идет" -- and a
+    # 300-ply game put a quarter of the game in front of the point. Measured on
+    # 40/90/180/300-ply games the first frame went from 0%, 60%, 0%, 24% of the
+    # game to 12 plies before the move in every one of them.
+    lead_from = max(0, target - int(lead_in_plies))
+    # The run-up stops where the window starts, so the two cannot overlap and the
+    # change of pace is a single step rather than two rules fighting over one ply.
+    lead = range(lead_from, window[0] if window else target + 1, step)
 
-    beats = [_Beat(ply, "skim") for ply in skim]
+    beats = [_Beat(ply, "lead") for ply in lead]
     beats += [_Beat(ply, "window") for ply in window]
-    if outro_ply is not None:
-        beats.append(_Beat(outro_ply, "outro"))
 
     beats = _thin(beats, max(1, int(max_frames)), target)
     beats = _drop_repeats(beats, placements, target)
 
     from shorts_clipper.chess.board import FrameSpec
 
-    # The skim takes whichever is slower: the rate the caller asked for, or the
-    # reading floor. ``step`` plies at ``skim_plies_per_second`` was the old rate,
-    # and at 48 ply/s it produced 0.125s frames that no one could read.
-    skim_hold = max(
-        SKIM_SECONDS_PER_FRAME,
-        MIN_HOLD_SECONDS,
-        step / max(0.001, float(skim_plies_per_second)),
-    )
+    lead_hold = max(MIN_HOLD_SECONDS, float(lead_in_seconds))
     decisive_hold = max(MIN_HOLD_SECONDS, DECISIVE_SECONDS)
     slow_hold = max(MIN_HOLD_SECONDS, float(slow_seconds_per_ply))
-    outro_hold = max(MIN_HOLD_SECONDS, OUTRO_SECONDS)
 
     holds = [
-        decisive_hold if b.slow and b.ply == target
-        else slow_hold if b.slow
-        else outro_hold if b.kind == "outro"
-        else skim_hold
+        decisive_hold if b.slow and b.ply == target else slow_hold if b.slow else lead_hold
         for b in beats
     ]
-    holds = _pad(holds, beats, MIN_CLIP_SECONDS)
-    # Readable frames lengthen the clip, so a long game now overshoots. The window
-    # and the outro are the parts that must keep their time; the skim gives way,
-    # and only as far as the ceiling demands.
+    holds = _pad(holds, MIN_CLIP_SECONDS)
+    # A long requested run-up would overshoot, so the run-up gives way, and only
+    # as far as the ceiling demands. The window never does.
     holds, beats = _fit_ceiling(holds, beats, MAX_CLIP_SECONDS)
 
     frames: list[FrameSpec] = []
@@ -318,10 +325,10 @@ def pace_game(
 def _narrate_beat(*, beat, target, game, fens, total_plies, decision_for=None):
     """``(FrameInfo, arrow, accent)`` for one beat, degrading to ``None``.
 
-    A beat can cover several plies during the skim, and narration wants a single
-    move to name. Those beats get the band filled as far as the position allows
-    and no arrow, which is the honest answer rather than pointing at an
-    arbitrary move.
+    Every beat names exactly one ply now that the skim is gone, so narration
+    always gets a single move to describe rather than a range it has to guess a
+    representative out of. A lead-in beat still gets no arrow: it is not the
+    move that was decisive, and pointing at an arbitrary one would be a lie.
     """
     try:
         from shorts_clipper.chess import narration
@@ -339,8 +346,8 @@ def _narrate_beat(*, beat, target, game, fens, total_plies, decision_for=None):
 
     # narrate() derives its own frame kind from the decision and the ply, so
     # there is no kind argument to pass. The decision is supplied only on the
-    # reveal: a skim or outro frame has no single move that was decisive, and
-    # handing it one would put a plausible-looking arrow on an arbitrary move.
+    # reveal: no other beat has a single move that was decisive, and handing
+    # narration one anyway would put a plausible-looking arrow on an arbitrary move.
     decision = _NarrationDecision(ply, san) if ply == target else None
 
     mover = ""
@@ -415,14 +422,6 @@ class _NarrationDecision:
     material: bool = True
     mate_before: int | None = None
     mate_after: int | None = None
-
-
-def _caption(beat: _Beat, target: int, game, total_plies: int) -> str:
-    if beat.slow:
-        return _slow_caption(beat.ply, target)
-    if beat.kind == "outro":
-        return _outro_caption(game, beat.ply)
-    return _skim_caption(beat.ply + 1, total_plies)
 
 
 def _window(target: int, limit: int, half: int) -> list[int]:
@@ -524,11 +523,12 @@ def _last_worth_showing(counts: list[int]) -> int:
 def _drop_repeats(beats: list[_Beat], placements: list[str], target: int) -> list[_Beat]:
     """Drop frames whose board is materially unchanged from the frame before.
 
-    The move-number rule in :func:`_window` is what stops the repetition; this
-    is the guard at the seams, where a skim frame, the window or the outro can
-    otherwise land on the position next to it. The decisive ply is exempt -- it
-    is the one frame the clip exists for, so it is emitted even if it happens to
-    look like its neighbour.
+    The move-number rule in :func:`_window` is what stops the repetition inside
+    the window; this is the guard everywhere else, and it earns its keep in the
+    lead-in, which is one frame per ply and therefore walks straight through
+    shuffling stretches where half a second apart two boards are the same board.
+    The decisive ply is exempt -- it is the one frame the clip exists for, so it
+    is emitted even if it happens to look like its neighbour.
     """
     out: list[_Beat] = []
     for beat in beats:
@@ -543,13 +543,17 @@ def _drop_repeats(beats: list[_Beat], placements: list[str], target: int) -> lis
 
 
 def _thin(beats: list[_Beat], max_frames: int, target: int) -> list[_Beat]:
-    """Fit into *max_frames* by dropping skim frames, keeping the ends.
+    """Fit into *max_frames* by dropping lead-in frames, keeping the ends.
 
     The window is what the clip is for, so it is the last thing to go and the
-    skim frames are the ones dropped. The first and last skim frame are kept
-    explicitly: the old version thinned with ``[::step]``, which keeps the head
-    but silently loses the tail, and which also yields ``ceil(len/step)``
+    lead-in frames are the ones dropped. The first and last lead-in frame are
+    kept explicitly: the old version thinned with ``[::step]``, which keeps the
+    head but silently loses the tail, and which also yields ``ceil(len/step)``
     frames, so a floored step overshot the cap (22 frames for a cap of 20).
+
+    A shipped lead-in plan is 11 frames against a cap of 44, so this never fires
+    at the defaults. It stays because it is the difference between a caller who
+    asks for a 200-ply run-up getting a short and getting a slideshow.
     """
     if len(beats) <= max_frames:
         return beats
@@ -586,13 +590,14 @@ def _thin(beats: list[_Beat], max_frames: int, target: int) -> list[_Beat]:
 def _fit_ceiling(
     holds: list[float], beats: list[_Beat], ceiling: float
 ) -> tuple[list[float], list[_Beat]]:
-    """Trim skim frames until the clip fits under *ceiling*.
+    """Trim lead-in frames until the clip fits under *ceiling*.
 
-    The reading floor and the length ceiling pull against each other: 0.35s a skim
-    frame is legible and a 170-ply game cannot fit into a short at that rate. This
-    resolves it in the one place the viewer can afford to lose -- the skim --
-    rather than by capping the frame count at the top, which would cut the tail off
-    the game instead of the middle.
+    Unreachable at the shipped constants -- a lead-in plan is 9.2s against a 20s
+    ceiling -- and kept because it is the only thing standing between a caller who
+    asks for a long run-up and a clip that stops being a short. It resolves the
+    conflict by cutting frames rather than speeding them up: shortening a frame
+    below what a position can be read in is the defect, and the run-up is the
+    only place the viewer can afford to lose something.
 
     Returns the trimmed holds and the beats that survived. The window is never
     dropped: losing the reveal would leave a clip about nothing.
@@ -600,19 +605,18 @@ def _fit_ceiling(
     if sum(holds) <= ceiling:
         return holds, beats
 
-    protected = [b.slow or b.kind == "outro" for b in beats]
-    skims = [i for i, b in enumerate(beats) if not protected[i]]
-    if not skims:
+    leads = [i for i, b in enumerate(beats) if not b.slow]
+    if not leads:
         return holds, beats
 
     excess = sum(holds) - ceiling
-    order = sorted(skims, key=lambda i: (-holds[i], i))
+    order = sorted(leads, key=lambda i: (-holds[i], i))
     cut: set[int] = set()
     for i in order:
         if excess <= 0:
             break
-        # Drop the skim frame outright; it is cheaper than showing it too fast to
-        # read, which is the defect being fixed.
+        # Drop the lead-in frame outright; it is cheaper than showing it too fast
+        # to read, which is the defect being fixed.
         excess -= holds[i]
         cut.add(i)
 
@@ -624,14 +628,20 @@ def _fit_ceiling(
     return [holds[i] for i in keep], [beats[i] for i in keep]
 
 
-def _pad(holds: list[float], beats: list[_Beat], minimum: float) -> list[float]:
-    """Grow the readable frames until the clip reaches *minimum* seconds.
+def _pad(holds: list[float], minimum: float) -> list[float]:
+    """Grow the clip evenly until it reaches *minimum* seconds.
 
-    A 40-ply game skims in about 0.9s, which left the plan 6.5s long -- a cut
-    rather than a clip. The deficit is spread over the window and the outro by
-    weight and given to the skim not at all, because a skim stretched to fill
-    time stops being a skim. Deterministic: the same plan always comes out the
-    same, with any rounding residue settled on the heaviest frame.
+    A lead-in plan is naturally 9.2s (8 x 0.45s, then 1.5 + 1.5 + 2.6), so this
+    floor almost never fires. It fires in exactly one case: the decisive move is
+    inside the first dozen plies, so there is no run-up to show and the plan
+    would be three frames and 5.6s -- a cut rather than a clip.
+
+    The deficit goes evenly rather than by kind. The old build gave the skim
+    weight zero and the window weight two, which existed to stop the skim being
+    stretched into a speedrun; there is no skim to protect now, and the thing
+    left to avoid is dumping the whole deficit on three window frames and turning
+    a 2.6s reveal into a 5s one. Deterministic: the same plan always comes out
+    the same, with any rounding residue settled on the longest frame.
     """
     if not holds:
         return holds
@@ -639,51 +649,26 @@ def _pad(holds: list[float], beats: list[_Beat], minimum: float) -> list[float]:
     if deficit <= 0:
         return holds
 
-    weights = [_PAD_WEIGHT[beat.kind] for beat in beats]
-    total = float(sum(weights))
-    if total <= 0:
-        weights = [1.0] * len(holds)
-        total = float(len(holds))
-
-    out = [round(h + deficit * w / total, 3) for h, w in zip(holds, weights, strict=True)]
+    each = round(deficit / len(holds), 3)
+    out = [round(h + each, 3) for h in holds]
     residue = round(minimum - sum(out), 3)
     if residue:
-        heaviest = max(range(len(out)), key=lambda i: weights[i])
-        out[heaviest] = round(out[heaviest] + residue, 3)
+        longest = max(range(len(out)), key=lambda i: out[i])
+        out[longest] = round(out[longest] + residue, 3)
     return [max(MIN_HOLD_SECONDS, h) for h in out]
-
-
-def _skim_caption(ply_done: int, total: int) -> str:
-    """Progress in move numbers, because ``49 / 134`` reads as 134 moves."""
-    return f"{ply_done // 2} / {total // 2}"
-
-
-def _slow_caption(ply: int, target: int) -> str:
-    if ply == target:
-        return f"вот этот ход — {ply // 2 + 1}…"
-    return f"{ply // 2 + 1}…"
-
-
-def _outro_caption(game, ply_done: int) -> str:
-    try:
-        result = str(game.headers.get("Result", "") or "").strip()
-    except Exception:
-        result = ""
-    tail = f" · {result}" if result and result != "*" else ""
-    return f"финал · {ply_done // 2 + 1}…{tail}"
 
 
 def plan_for_highlight(
     game,
     decision,
     *,
-    skim_plies_per_second: float = SKIM_PLIES_PER_SECOND,
-    skim_plies_per_frame: int = SKIM_PLIES_PER_FRAME,
+    lead_in_plies: int = LEAD_IN_PLIES,
+    lead_in_seconds: float = LEAD_IN_SECONDS,
+    lead_in_step: int = LEAD_IN_STEP,
     slow_seconds_per_ply: float = SLOW_SECONDS_PER_PLY,
     slow_window: int = SLOW_WINDOW_PLIES,
-    skim_history: int = SKIM_HISTORY_PLIES,
 ):
-    """A clip that skims up to the decisive move, then slows on it."""
+    """A clip that runs up to the decisive move, then slows on it."""
     from shorts_clipper.chess.clip import ChessClipPlan
 
     target = resolve_target_ply(game, decision)
@@ -693,14 +678,12 @@ def plan_for_highlight(
     frames, holds = pace_game(
         game,
         target,
-        skim_plies_per_second=skim_plies_per_second,
-        skim_plies_per_frame=skim_plies_per_frame,
+        lead_in_plies=lead_in_plies,
+        lead_in_seconds=lead_in_seconds,
+        lead_in_step=lead_in_step,
         slow_seconds_per_ply=slow_seconds_per_ply,
         slow_window=slow_window,
         decision=decision,
-        # The skim opens just far enough back that the move has some history,
-        # and no further: the opening is the part of a game nobody is waiting for.
-        skim_start_ply=max(0, target - int(skim_history)),
     )
     if not frames:
         return ChessClipPlan(frames=[])

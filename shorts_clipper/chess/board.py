@@ -64,8 +64,13 @@ _MOVE_SEPARATOR = "   ·   "
 _MOVE_STROKE = 2
 
 # Muted palette: the board must not fight the caption text for attention.
-LIGHT_SQUARE = (222, 214, 200)
-DARK_SQUARE = (124, 116, 108)
+# Lichess's brown board. The previous pair was a desaturated grey with a purple
+# cast (124,116,108) against a cream, and that mud is most of why the frames read
+# as clipart rather than as a chess board: the pieces were fine, the squares
+# under them were not. These are the values lichess.org ships as its default.
+LIGHT_SQUARE = (240, 217, 181)  # #f0d9b5
+DARK_SQUARE = (181, 136, 99)  # #b58863
+BOARD_EDGE = (120, 90, 68)
 BOARD_BG = (18, 18, 20)
 TEXT_MAIN = (245, 245, 245)
 TEXT_DIM = (150, 150, 155)
@@ -606,7 +611,10 @@ def render_frame(spec: FrameSpec, out_path: str | Path) -> Path:
         log.debug("FEN parse failed while drawing", exc_info=True)
         pieces = {}
 
-    glyph_font = _first_font(_PIECE_FONTS, int(step * 0.82), "\u2654")
+# 0.82 left the pieces floating in their squares with a visible margin, which is
+    # much of what made them read as clipart pasted onto a board. lichess and
+    # chess.com fill roughly 92% of the square height.
+    glyph_font = _first_font(_PIECE_FONTS, int(step * 0.92), "\u2654")
     moved = {s.lower() for s in spec.highlight_squares}
     for (file, rank), (cx, cy) in _square_centres(BOARD).items():
         piece = pieces.get(chess_square(file, rank)) if _chess_ok() else None

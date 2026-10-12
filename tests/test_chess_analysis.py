@@ -191,8 +191,11 @@ class BoardRenderTests(unittest.TestCase):
             img = Image.open(out)
             self.assertEqual(img.size, (1080, 1920))
             colors = {c for _, c in img.convert("RGB").getcolors(maxcolors=200000)}
-            self.assertIn((222, 214, 200), colors, "light squares missing")
-            self.assertIn((124, 116, 108), colors, "dark squares missing")
+            from shorts_clipper.chess import board as _b
+            self.assertIn(_b.LIGHT_SQUARE, colors, "light squares missing")
+            self.assertIn(_b.DARK_SQUARE, colors, "dark squares missing")
+            from shorts_clipper.chess import board as _b2
+        self.assertIn(_b2.DARK_SQUARE, colors, "dark squares missing")
 
     def test_piece_font_covers_chess_glyphs(self):
         from shorts_clipper.chess.board import _PIECE_FONTS, _covers, _first_font

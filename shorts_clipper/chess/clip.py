@@ -35,6 +35,23 @@ HOLD_MOVE = 2.4
 HOLD_AFTER = 2.8
 CROSSFADE = 0.4
 
+CLIP_WIDTH = 1080
+CLIP_HEIGHT = 1920
+
+# Camera shake, measured in output pixels at CLIP_WIDTH. Below 3px it disappears
+# on a phone screen, above 6px the squares stop being countable, which costs more
+# than the tension is worth. It has to be even: the chain ends in yuv420p and both
+# pad and crop round their offsets down to a whole chroma sample there, so an odd
+# amplitude does not shake by that amplitude -- it shakes by up to amplitude+1 on
+# one side only, which is a lurch rather than a jolt. SHAKE_HZ is the frequency
+# and SHAKE_DECAY the damping per second; together they put the whole shake
+# inside the first third of a second of the beat, so a 2.8s hold jolts and then
+# sits still instead of vibrating for the whole hold, which reads as a broken
+# render rather than an impact.
+SHAKE_PX = 4
+SHAKE_HZ = 8.0
+SHAKE_DECAY = 8.0
+
 
 @dataclasses.dataclass
 class ChessClipPlan:
@@ -46,6 +63,13 @@ class ChessClipPlan:
     # which runs dozens of frames with wildly different durations; the three
     # fixed fields cannot express that.
     holds: list[float] | None = None
+    # Frame indices that get a camera shake, applied to that frame's own hold.
+    # Empty by default and it stays empty: this renderer is shared with the
+    # highlight and challenge formats, and a clip that shakes throughout reads as
+    # a mistake rather than as impact. A shake belongs on the decisive beats, and
+    # only the caller knows which ones those are. Indices that name no frame are
+    # ignored.
+    shake_frames: tuple[int, ...] = ()
 
     @property
     def duration(self) -> float:
@@ -236,6 +260,64 @@ def _hold_seconds(plan, index: int) -> float:
     return plan.after_seconds
 
 
+def _shake_pad_colour(png: str | Path) -> str:
+    """The ffmpeg colour for the pixels a shake uncovers at the frame edge.
+
+    ``crop`` can only ever move the window *inside* its input, so the frame has
+    to be grown by ``SHAKE_PX`` before it can be displaced at all. Filling that
+    margin with the colour the frame already has in its corner means the strip
+    the shake uncovers looks like more background rather than like a black bar.
+    Read from the rendered PNG rather than hard-coded, because the board palette
+    is not this module's to own.
+    """
+    try:
+        from PIL import Image
+
+        with Image.open(png) as img:
+            red, green, blue = img.convert("RGB").getpixel((0, 0))
+        return f"0x{red:02x}{green:02x}{blue:02x}"
+    except Exception:
+        log.debug("could not read the frame corner colour", exc_info=True)
+        return "black"
+
+
+def _shake_filters(pad_colour: str) -> str:
+    """Filters that displace a frame by a few pixels and let it settle.
+
+    ``pad`` grows the frame by ``SHAKE_PX`` on every side and ``crop`` takes a
+    CLIP_WIDTH x CLIP_HEIGHT window out of it at an offset that starts at the
+    full amplitude and is damped to nothing within the first third of a second.
+    The displacement is the crop window moving, so the board itself is
+    translated whole -- which is what a camera shake is -- and the Ken Burns
+    zoom from ``zoompan`` is untouched: the shake runs after it, on its output.
+
+    The expression is quoted because ffmpeg re-parses filter arguments. The
+    window is always inside the padded frame: x and y range over
+    ``0 .. 2 * SHAKE_PX``, so ``crop`` never clamps. Both traps here are silent
+    rather than loud, which is the whole reason they are worth writing down:
+
+    * a full-size ``crop`` with a non-zero x is quietly forced back to x=0, so
+      the filter runs, exits 0, and produces bytes identical to no shake at all;
+    * in yuv420p, which this chain ends in, ``pad`` and ``crop`` both round
+      offsets down to a whole chroma sample, so an odd SHAKE_PX would come out
+      as amplitude+1 on one side and amplitude-1 on the other.
+    """
+    amp = SHAKE_PX
+
+    def axis(trig: str, rate: float) -> str:
+        return (
+            f"{amp}+round({amp}*exp(-{SHAKE_DECAY}*t)"
+            f"*{trig}(2*PI*{SHAKE_HZ * rate}*t))"
+        )
+
+    return (
+        f"pad=w={CLIP_WIDTH + 2 * amp}:h={CLIP_HEIGHT + 2 * amp}"
+        f":x={amp}:y={amp}:color={pad_colour},"
+        f"crop=w={CLIP_WIDTH}:h={CLIP_HEIGHT}"
+        f":x='{axis('cos', 1.0)}':y='{axis('sin', 1.5)}'"
+    )
+
+
 def render_clip(
     plan: ChessClipPlan,
     out_path: str | Path,
@@ -257,6 +339,11 @@ def render_clip(
     halves of one job landed on different volumes: with the drive nearly full the
     frame PNGs failed to write and the render died with no frames and no clue
     why. Keeping scratch beside the output means one cleanup frees both.
+
+    ``plan.shake_frames`` adds a camera shake to the beats it names, on top of
+    the zoom, and only to those: a shake that runs for the whole clip reads as a
+    broken render rather than as impact. Paced plans (``holds`` set) have no
+    per-beat filter chain and ignore it.
     """
     import tempfile
 
@@ -268,6 +355,15 @@ def render_clip(
 
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
+
+    # Out-of-range indices simply never match a frame index, so a plan naming a
+    # beat that does not exist renders instead of raising.
+    shaken = set(plan.shake_frames or ())
+    if shaken and plan.holds is not None:
+        log.warning(
+            "shake_frames ignored: a paced plan drives ffmpeg from a concat "
+            "list, which has no per-beat filter chain to shake"
+        )
 
     tmp_ctx = None
     if work_dir is None:
@@ -313,12 +409,15 @@ def render_clip(
             return out
 
         segments = []
-        zoom = f"zoompan=z='min(zoom+0.0009,1.10)':d=1:s=1080x1920:fps={fps}"
+        zoom = f"zoompan=z='min(zoom+0.0009,1.10)':d=1:s={CLIP_WIDTH}x{CLIP_HEIGHT}:fps={fps}"
 
         for i, spec in enumerate(plan.frames):
             png = render_frame(spec, work / f"frame_{i}.png")
             seconds = max(0.2, float(_hold_seconds(plan, i)))
             seg = work / f"seg_{i}.mp4"
+            filters = zoom
+            if i in shaken:
+                filters = f"{zoom},{_shake_filters(_shake_pad_colour(png))}"
             cmd = [
                 ffmpeg, "-y", "-v", "error",
                 "-loop", "1", "-framerate", str(fps), "-t", f"{seconds:.3f}",
@@ -327,7 +426,7 @@ def render_clip(
                 # bed-driven in practice, and a video-only mp4 makes the later
                 # mix fail on "[0:a] matches no streams".
                 "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
-                "-vf", f"{zoom},format=yuv420p",
+                "-vf", f"{filters},format=yuv420p",
                 "-map", "0:v", "-map", "1:a",
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
                 "-c:a", "aac", "-b:a", "128k", "-shortest",
